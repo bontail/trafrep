@@ -1,7 +1,10 @@
 package replay
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -10,48 +13,120 @@ import (
 	"time"
 
 	"trafRep/internal/models"
+	"trafRep/internal/stream"
 )
 
-// connectTCP соединяется к targetHost:targetPort и возвращает net.Conn.
+// connectTCP устанавливает TCP‑соединение с указанным адресом и возвращает net.Conn.
 func connectTCP(targetHost string, targetPort int) (net.Conn, error) {
 	addr := fmt.Sprintf("%s:%d", targetHost, targetPort)
 	return net.Dial("tcp", addr)
 }
 
-// ReplayMessages сортирует сообщения по времени и воспроизводит их через TCP,
-// соблюдая интервалы между сообщениями (c учётом config.Rate).
-// Успехи печатаются в stdout, ошибки — в stderr (log).
+// waitForReady читает из conn до тех пор, пока не встретит серверное сообщение типа 'Z' (ReadyForQuery).
+// readTimeout задаёт максимальное время ожидания (общий таймаут для поиска 'Z').
+// Функция съедает прочитанные байты из соединения (не возвращает их).
+func waitForReady(conn net.Conn, readTimeout time.Duration) error {
+	if conn == nil {
+		return fmt.Errorf("nil connection")
+	}
+	deadline := time.Now().Add(readTimeout)
+	buf := make([]byte, 0)
+	tmp := make([]byte, 4096)
+
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting ReadyForQuery")
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, err := conn.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+		}
+		if err != nil {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				continue
+			}
+			if err == io.EOF {
+				return fmt.Errorf("connection closed by remote")
+			}
+			return fmt.Errorf("read error while waiting ReadyForQuery: %w", err)
+		}
+
+		for {
+			if len(buf) == 0 {
+				break
+			}
+
+			first := buf[0]
+			isASCIIType := (first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z')
+			if isASCIIType {
+				if len(buf) < 5 {
+					break
+				}
+				msgLen := int(binary.BigEndian.Uint32(buf[1:5]))
+				if msgLen <= 0 {
+					return fmt.Errorf("invalid server length %d", msgLen)
+				}
+				total := 1 + msgLen
+				if len(buf) < total {
+					break
+				}
+				if first == 'Z' {
+					return nil
+				}
+				buf = buf[total:]
+				continue
+			}
+
+			if len(buf) < 4 {
+				break
+			}
+			msgLen := int(binary.BigEndian.Uint32(buf[0:4]))
+			if msgLen <= 0 {
+				return fmt.Errorf("invalid server length-only %d", msgLen)
+			}
+			if len(buf) < msgLen {
+				break
+			}
+
+			buf = buf[msgLen:]
+		}
+	}
+}
+
+// ReplayMessages сортирует сообщения по времени и воспроизводит их через TCP.
+// Временные интервалы между сообщениями масштабируются по config.Rate.
+// Если config.Rate == 1.0 — используются оригинальные интервалы (точное время).
+// После отправки каждого клиентского сообщения функция ждёт серверное ReadyForQuery ('Z').
 func ReplayMessages(messages []models.PostgreSQLMessage, config models.ReplayConfig) error {
 	if len(messages) == 0 {
 		return fmt.Errorf("no messages to replay")
 	}
 
-	// сортируем по времени
 	sort.Slice(messages, func(i, j int) bool {
-		return messages[i].Timestamp.Before(messages[j].Timestamp)
+		return messages[i].FirstTCPPacketTimestamp.Before(messages[j].FirstTCPPacketTimestamp)
 	})
-
-	firstTime := messages[0].Timestamp
-	replayStart := time.Now()
 
 	conn, err := connectTCP(config.TargetHost, config.TargetPort)
 	if err != nil {
 		log.Printf("failed to connect to target %s:%d: %v", config.TargetHost, config.TargetPort, err)
-		// позволим попытки при первой записи
 		conn = nil
 	}
 
-	const maxRetries = 3
 	var successCount, errorCount int
+	readyTimeout := 5 * time.Second
+
+	firstTime := messages[0].FirstTCPPacketTimestamp
+	replayStart := time.Now()
 
 	for i, m := range messages {
-		targetOffset := time.Duration(float64(m.Timestamp.Sub(firstTime)) / config.Rate)
+		targetOffset := time.Duration(float64(m.FirstTCPPacketTimestamp.Sub(firstTime)) / config.Rate)
 		targetTime := replayStart.Add(targetOffset)
 		if wait := time.Until(targetTime); wait > 0 {
 			time.Sleep(wait)
 		}
 
-		// ensure connected
 		if conn == nil {
 			c, err := connectTCP(config.TargetHost, config.TargetPort)
 			if err != nil {
@@ -63,31 +138,53 @@ func ReplayMessages(messages []models.PostgreSQLMessage, config models.ReplayCon
 		}
 
 		var writeErr error
-		for attempt := 0; attempt < maxRetries; attempt++ {
-			_, writeErr = conn.Write(m.Raw)
+		for attempt := 0; attempt < config.MaxRetries; attempt++ {
+			row := m.Row()
+			_, writeErr = conn.Write(row)
 			if writeErr == nil {
 				break
 			}
-			log.Printf("Write attempt %d/%d failed for message %d: %v. Reconnecting...", attempt+1, maxRetries, i+1, writeErr)
+			log.Printf("Write attempt %d/%d failed for message %d: %v. Reconnecting...", attempt+1, config.MaxRetries, i+1, writeErr)
 			_ = conn.Close()
 			conn = nil
 			time.Sleep(100 * time.Millisecond)
+			if attempt < config.MaxRetries-1 {
+				c, err := connectTCP(config.TargetHost, config.TargetPort)
+				if err == nil {
+					conn = c
+				}
+			}
 		}
 		if writeErr != nil {
 			errorCount++
 			log.Printf("Message %d ERROR - write failed: %v", i+1, writeErr)
 			continue
 		}
+
+		if i != len(messages)-1 {
+			if err := waitForReady(conn, readyTimeout); err != nil {
+				errorCount++
+				log.Printf("Message %d ERROR - waiting ReadyForQuery failed: %v", i+1, err)
+				_ = conn.Close()
+				conn = nil
+				continue
+			}
+		}
+
 		successCount++
-		// успешные события выводим в stdout
-		fmt.Fprintf(os.Stdout, "Message %d/%d SUCCESS - %s:%d -> %s:%d - %d bytes\n",
-			i+1, len(messages), m.IPSource, m.PortSource, m.IPDest, m.PortDest, len(m.Raw))
+		row := m.Row()
+		msg := fmt.Sprintf("Message %d/%d SUCCESS - %d bytes, Type: %s", i+1, len(messages), len(row), m.Type.String())
+		if config.PrintQuery && m.Type.IsSimpleQuery() {
+			msg += fmt.Sprintf(
+				", QUERY: %s", stream.ExtractPrettyQuery(m.Payload),
+			)
+		}
+		fmt.Println(msg)
 	}
 
 	if conn != nil {
 		if err := conn.Close(); err != nil {
 			if strings.Contains(err.Error(), "use of closed network connection") {
-				// ignore
 			} else {
 				log.Printf("Error closing connection: %v", err)
 			}

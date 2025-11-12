@@ -1,6 +1,8 @@
 package pcap
 
 import (
+	"net"
+
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
@@ -8,10 +10,16 @@ import (
 	"trafRep/internal/models"
 )
 
-// ExtractPackets читает пакеты из handle и возвращает TCP-пакеты,
-// которые связаны с filterHost (если указан) и/или имеют порт filterPort.
-func ExtractPackets(handle *pcap.Handle, filterHost string, filterPort int) []models.TCPPacket {
-	var packets []models.TCPPacket
+// ExtractPackets читает пакеты из handle и возвращает PostgresTCPPacket,
+// соответствующие заданному filterIP и filterPort.
+// filterIP должен быть корректным net.IP; функция возвращает только те пакеты,
+// у которых src или dst совпадает с filterIP и соответствующий порт равен filterPort.
+func ExtractPackets(handle *pcap.Handle, filterIP net.IP, filterPort uint16) []models.PostgresTCPPacket {
+	if filterIP == nil {
+		return nil
+	}
+
+	var packets []models.PostgresTCPPacket
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 
 	for packet := range packetSource.Packets() {
@@ -27,38 +35,30 @@ func ExtractPackets(handle *pcap.Handle, filterHost string, filterPort int) []mo
 		if len(tcp.Payload) == 0 {
 			continue
 		}
-		var ipSrc, ipDst string
+
+		var ipSrc net.IP
+		var ipDst net.IP
 		switch layer := networkLayer.(type) {
 		case *layers.IPv4:
-			ipSrc = layer.SrcIP.String()
-			ipDst = layer.DstIP.String()
+			ipSrc = layer.SrcIP
+			ipDst = layer.DstIP
 		case *layers.IPv6:
-			ipSrc = layer.SrcIP.String()
-			ipDst = layer.DstIP.String()
+			ipSrc = layer.SrcIP
+			ipDst = layer.DstIP
 		}
-		portSrc := uint16(tcp.SrcPort)
-		portDest := uint16(tcp.DstPort)
 
-		// порт должен совпадать хотя бы у одной стороны
-		if int(portDest) != filterPort && int(portSrc) != filterPort {
+		if !((uint16(tcp.SrcPort) == filterPort && ipSrc.Equal(filterIP)) ||
+			(uint16(tcp.DstPort) == filterPort && ipDst.Equal(filterIP))) {
 			continue
 		}
 
-		// если задан хост — одна из сторон должна совпадать
-		if filterHost != "" && filterHost != "0.0.0.0" {
-			if ipSrc != filterHost && ipDst != filterHost {
-				continue
-			}
-		}
-
-		packets = append(packets, models.TCPPacket{
-			Timestamp:    packet.Metadata().Timestamp,
-			Data:         tcp.Payload,
-			IPSource:     ipSrc,
-			IPDest:       ipDst,
-			PortSource:   portSrc,
-			PortDest:     portDest,
-			IsPostgreSQL: true,
+		packets = append(packets, models.PostgresTCPPacket{
+			Timestamp:  packet.Metadata().Timestamp,
+			Data:       tcp.Payload,
+			IPSource:   ipSrc.String(),
+			IPDest:     ipDst.String(),
+			PortSource: uint16(tcp.SrcPort),
+			PortDest:   uint16(tcp.DstPort),
 		})
 	}
 	return packets
