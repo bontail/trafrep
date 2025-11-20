@@ -2,24 +2,102 @@ package stream
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
-	"trafRep/internal/models"
+	msgtypes "trafRep/internal/stream/message_types"
 )
+
+// PostgreSQLMessage представляет одно логическое сообщение PostgreSQL от клиента к серверу,
+// объединённое из одного или нескольких TCP-сегментов.
+type PostgreSQLMessage struct {
+	FirstTCPPacketTimestamp  time.Time
+	LastTCPPacketTimestamp   time.Time
+	CommandCompleteTimestamp time.Time
+	ReadyForQueryTimestamp   time.Time
+	Type                     msgtypes.ClientMessageType
+	Len                      uint32
+	Payload                  []byte
+}
+
+// PrettyQuery возвращает строку с SQL запросом для вывода.
+func (m PostgreSQLMessage) PrettyQuery() string {
+	return strings.TrimSpace(string(m.Payload[:len(m.Payload)-1]))
+}
+
+// Row возвращает байтовое представление сообщения в том виде, которое нужно отправлять.
+func (m PostgreSQLMessage) Row() []byte {
+	if m.Type.HaveTypeByte() {
+		return m.typedByteRow()
+	}
+	return m.untypedByteRow()
+}
+
+func (m PostgreSQLMessage) typedByteRow() []byte {
+	buf := make([]byte, m.Len+1)
+	buf[0] = byte(m.Type)
+	binary.BigEndian.PutUint32(buf[1:5], m.Len)
+	copy(buf[5:], m.Payload)
+	return buf
+}
+
+func (m PostgreSQLMessage) untypedByteRow() []byte {
+	buf := make([]byte, m.Len)
+	binary.BigEndian.PutUint32(buf[0:4], m.Len)
+	copy(buf[4:], m.Payload)
+	return buf
+}
 
 // TCPStream хранит буферы и сегменты для двух направлений одного TCP-потока.
 type TCPStream struct {
-	clientBuf  []byte
-	clientSegr []segment
-	serverBuf  []byte
-	serverSegr []segment
-	completed  []models.PostgreSQLMessage
+	clientBuf                []byte
+	clientSegs               segments
+	serverBuf                []byte
+	serverSegs               segments
+	completed                []PostgreSQLMessage
+	needCommandCompleteIndex int
+	needReadyForQueryIndex   int
 }
 
+// NewTCPStream создаёт и возвращает новый экземпляр TCPStream.
+func NewTCPStream() *TCPStream {
+	return &TCPStream{
+		clientBuf:  make([]byte, 0),
+		clientSegs: make([]segment, 0),
+		serverBuf:  make([]byte, 0),
+		serverSegs: make([]segment, 0),
+		completed:  make([]PostgreSQLMessage, 0),
+	}
+}
+
+// Reset очищает все внутренние буферы и сегменты TCPStream.
+func (s *TCPStream) Reset() {
+	s.clientBuf = s.clientBuf[:0]
+	s.clientSegs = s.clientSegs[:0]
+	s.serverBuf = s.serverBuf[:0]
+	s.serverSegs = s.serverSegs[:0]
+	s.completed = s.completed[:0]
+}
+
+// segment представляет один TCP пакет с его длиной и временной меткой.
 type segment struct {
 	length uint32
 	ts     time.Time
+}
+
+type segments []segment
+
+func (s segments) timestampByOffset(offset int) time.Time {
+	var acc uint32 = 0
+	for _, seg := range s {
+		if uint32(offset) < acc+seg.length {
+			return seg.ts
+		}
+		acc += seg.length
+	}
+	return time.Time{}
 }
 
 // TCPStreamManager управляет множеством TCPStream и обеспечивает
@@ -39,141 +117,155 @@ func NewTCPStreamManager() *TCPStreamManager {
 // serverPort используется для определения направления (client<->server).
 // Данные от клиента накапливаются и из них извлекаются полные PostgreSQL‑сообщения,
 // которые сохраняются во внутреннем срезе completed.
-// Данные от сервера накапливаются и сканируются на предмет сообщений типа 'C' (CommandComplete).
-// Для найденного CommandComplete выставляется CommandCompleteTimestamp для первой незавершённой
-// клиентской записи в completed.
-func (m *TCPStreamManager) AddPacket(key string, data []byte, timestamp time.Time, ipSrc, ipDst string, portSrc, portDst uint16, serverPort uint16) {
+// Данные от сервера накапливаются и сканируются на предмет сообщений типа CommandComplete и ReadyForQuery.
+// Для найденного типа выставляется Timestamp для первой незавершённой клиентской записи в completed.
+func (m *TCPStreamManager) AddPacket(data []byte, timestamp time.Time, ipSrc, ipDst string, portSrc, portDst uint16, serverIp string, serverPort uint16) error {
+	isFromServer := ipSrc == serverIp && portSrc == serverPort
+
+	key := fmt.Sprintf("%s:%d->%s:%d", ipSrc, portSrc, ipDst, portDst)
+	if isFromServer {
+		key = fmt.Sprintf("%s:%d->%s:%d", ipDst, portDst, ipSrc, portSrc)
+	}
+
 	stream, ok := m.streams[key]
 	if !ok {
-		stream = &TCPStream{
-			clientBuf:  make([]byte, 0),
-			clientSegr: make([]segment, 0),
-			serverBuf:  make([]byte, 0),
-			serverSegr: make([]segment, 0),
-			completed:  make([]models.PostgreSQLMessage, 0),
-		}
+		stream = NewTCPStream()
 		m.streams[key] = stream
 	}
 
-	isFromServer := portSrc == serverPort
-
-	if len(data) > 0 {
-		if isFromServer {
-			stream.serverBuf = append(stream.serverBuf, data...)
-			stream.serverSegr = append(stream.serverSegr, segment{length: uint32(len(data)), ts: timestamp})
-			stream.parseServerBuffer()
-		} else {
-			stream.clientBuf = append(stream.clientBuf, data...)
-			stream.clientSegr = append(stream.clientSegr, segment{length: uint32(len(data)), ts: timestamp})
-			stream.parseClientBuffer()
-		}
+	if data == nil {
+		return errors.New("data is nil")
 	}
+	if len(data) < 4 {
+		return errors.New("data length less than 4 bytes")
+	}
+
+	if isFromServer {
+		stream.addServerData(data, timestamp)
+	} else {
+		stream.addClientData(data, timestamp)
+	}
+
+	return nil
 }
 
 // CollectMessages возвращает все собранные клиентские сообщения из текущих потоков.
 // После возврата сообщения и все внутренние буферы/сегменты потока очищаются,
 // а поток удаляется из менеджера (освобождение памяти и сброс состояния).
-func (m *TCPStreamManager) CollectMessages() []models.PostgreSQLMessage {
-	var out []models.PostgreSQLMessage
+func (m *TCPStreamManager) CollectMessages() []PostgreSQLMessage {
+	var out []PostgreSQLMessage
 	for key, s := range m.streams {
 		if len(s.completed) > 0 {
 			out = append(out, s.completed...)
 		}
-		s.completed = nil
-		s.clientBuf = nil
-		s.clientSegr = nil
-		s.serverBuf = nil
-		s.serverSegr = nil
+		s.Reset()
 		delete(m.streams, key)
 	}
 	return out
 }
 
-// parseClientBuffer извлекает целые клиентские PostgreSQL‑сообщения из clientBuf
-// и добавляет их в s.completed. Поддерживаются два формата:
-// 1) typed: 1 байт type + 4 байта length (big-endian) + payload
-// 2) length-only: 4 байта length + payload (Startup/SSLRequest).
-func (s *TCPStream) parseClientBuffer() {
-	var processed uint32 = 0
+func (s *TCPStream) addClientData(data []byte, timestamp time.Time) {
+	s.clientBuf = append(s.clientBuf, data...)
+	s.clientSegs = append(s.clientSegs, segment{length: uint32(len(data)), ts: timestamp})
+	s.parseClientBuffer()
+}
 
-	for rem := uint32(len(s.clientBuf)) - processed; rem > 4; rem = uint32(len(s.clientBuf)) - processed {
-		remaining := s.clientBuf[processed:]
-		first := remaining[0]
-		isASCIIType := (first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z')
+func (s *TCPStream) addServerData(data []byte, timestamp time.Time) {
+	s.serverBuf = append(s.serverBuf, data...)
+	s.serverSegs = append(s.serverSegs, segment{length: uint32(len(data)), ts: timestamp})
+	s.parseServerBuffer()
+}
 
-		if isASCIIType {
-			lenField := binary.BigEndian.Uint32(remaining[1:5])
-			total := 1 + lenField
-			if rem < total {
-				break
-			}
-			payloadLen := lenField - 4
-			payload := make([]byte, payloadLen)
-			copy(payload, remaining[5:5+payloadLen])
-			msgFirstTs := s.timestampForClientOffset(processed)
-			msgLastTs := s.timestampForClientOffset(processed + total - 1)
-			s.completed = append(s.completed, models.PostgreSQLMessage{
-				FirstTCPPacketTimestamp:  msgFirstTs,
-				LastTCPPacketTimestamp:   msgLastTs,
-				CommandCompleteTimestamp: time.Time{},
-				Len:                      uint32(lenField),
-				Payload:                  payload,
-				Type:                     models.ClientMessageType(first),
-			})
-			processed += total
-			continue
-		}
-
-		lenField := binary.BigEndian.Uint32(remaining[0:4])
-		if rem < lenField {
-			break
-		}
-		payloadLen := lenField - 4
-		payload := make([]byte, payloadLen)
-		copy(payload, remaining[4:4+payloadLen])
-		msgFirstTs := s.timestampForClientOffset(processed)
-		msgLastTs := s.timestampForClientOffset(processed + lenField - 1)
-		s.completed = append(s.completed, models.PostgreSQLMessage{
+// tryCreateTypedMessage пытается создать PostgreSQLMessage с типом.
+func (s *TCPStream) tryCreateTypedMessage() (msg PostgreSQLMessage, processed int) {
+	msgType := s.clientMessageType()
+	dataLen := int(binary.BigEndian.Uint32(s.clientBuf[1:5]))
+	total := 1 + dataLen
+	if len(s.clientBuf) < total {
+		return PostgreSQLMessage{}, 0
+	}
+	payloadLen := dataLen - 4
+	payload := make([]byte, payloadLen)
+	copy(payload, s.clientBuf[5:5+payloadLen])
+	msgFirstTs := s.clientSegs.timestampByOffset(0)
+	msgLastTs := s.clientSegs.timestampByOffset(total - 1)
+	return PostgreSQLMessage{
 			FirstTCPPacketTimestamp:  msgFirstTs,
 			LastTCPPacketTimestamp:   msgLastTs,
 			CommandCompleteTimestamp: time.Time{},
-			Len:                      lenField,
+			Len:                      uint32(dataLen),
 			Payload:                  payload,
-			Type:                     0, // length-only
-		})
-		processed += lenField
-	}
+			Type:                     msgType,
+		},
+		total
+}
 
-	if processed > 0 {
-		if processed >= uint32(len(s.clientBuf)) {
-			s.clientBuf = s.clientBuf[:0]
-			s.clientSegr = s.clientSegr[:0]
+// tryCreateUntypedMessage пытается создать PostgreSQLMessage без типа.
+func (s *TCPStream) tryCreateUntypedMessage() (msg PostgreSQLMessage, processed int) {
+	remaining := s.clientBuf[:]
+	dataLen := int(binary.BigEndian.Uint32(remaining[0:4]))
+	if len(s.clientBuf) < dataLen {
+		return PostgreSQLMessage{}, 0
+	}
+	payloadLen := dataLen - 4
+	payload := make([]byte, payloadLen)
+	copy(payload, remaining[4:4+payloadLen])
+	msgFirstTs := s.clientSegs.timestampByOffset(0)
+	msgLastTs := s.clientSegs.timestampByOffset(dataLen - 1)
+	return PostgreSQLMessage{
+		FirstTCPPacketTimestamp:  msgFirstTs,
+		LastTCPPacketTimestamp:   msgLastTs,
+		CommandCompleteTimestamp: time.Time{},
+		Len:                      uint32(dataLen),
+		Payload:                  payload,
+		Type:                     msgtypes.ClientMessageTypeOnlyLength,
+	}, dataLen
+
+}
+
+// parseClientBuffer извлекает целые PostgreSQLMessage из clientBuf и добавляет их в completed.
+func (s *TCPStream) parseClientBuffer() {
+	for len(s.clientBuf) > 3 {
+		var msg PostgreSQLMessage
+		var processed int
+
+		msgType := s.clientMessageType()
+		if msgType.HaveTypeByte() {
+			msg, processed = s.tryCreateTypedMessage()
 		} else {
-			s.clientBuf = s.clientBuf[processed:]
-			rem := processed
-			newSegs := make([]segment, 0, len(s.clientSegr))
-			for _, seg := range s.clientSegr {
-				if rem <= 0 {
-					newSegs = append(newSegs, seg)
-					continue
-				}
-				if rem < seg.length {
-					seg.length -= rem
-					newSegs = append(newSegs, seg)
-					rem = 0
-				} else {
-					rem -= seg.length
-				}
+			msg, processed = s.tryCreateUntypedMessage()
+		}
+
+		if processed > 0 {
+			if !msg.Type.NeedCommandCompleteAnswer() {
+				s.needCommandCompleteIndex++
 			}
-			s.clientSegr = newSegs
+			if !msg.Type.NeedReadyForQueryAnswer() {
+				s.needReadyForQueryIndex++
+			}
+			s.completed = append(s.completed, msg)
+			s.clearProcessedBytes(processed)
+		} else {
+			break
 		}
 	}
+}
+
+func (s *TCPStream) clearProcessedBytes(processed int) {
+	s.clientBuf = s.clientBuf[processed:]
+	bytes := uint32(0)
+	checkedSegs := 0
+	for bytes < uint32(processed) {
+		bytes += s.clientSegs[checkedSegs].length
+		checkedSegs++
+	}
+	s.clientSegs = s.clientSegs[checkedSegs:]
 }
 
 // parseServerBuffer извлекает серверные сообщения из serverBuf и для каждого
 // сообщения типа 'C' (CommandComplete) назначает CommandCompleteTimestamp для первой
 // незавершённой клиентской записи в s.completed.
-func (s *TCPStream) parseServerBuffer() {
+func (s *TCPStream) parseServerBuffer() { // TODO: сделать нормально
 	var processed uint32 = 0
 
 	for rem := uint32(len(s.serverBuf)) - processed; rem > 0; rem = uint32(len(s.serverBuf)) - processed {
@@ -194,7 +286,7 @@ func (s *TCPStream) parseServerBuffer() {
 			}
 
 			if first == 'C' {
-				ts := s.timestampForServerOffset(processed)
+				ts := s.serverSegs.timestampByOffset(int(processed))
 				s.assignCommandComplete(ts)
 			}
 			processed += total
@@ -215,12 +307,12 @@ func (s *TCPStream) parseServerBuffer() {
 	if processed > 0 {
 		if processed >= uint32(len(s.serverBuf)) {
 			s.serverBuf = s.serverBuf[:0]
-			s.serverSegr = s.serverSegr[:0]
+			s.serverSegs = s.serverSegs[:0]
 		} else {
 			s.serverBuf = s.serverBuf[processed:]
 			rem := processed
-			newSegs := make([]segment, 0, len(s.serverSegr))
-			for _, seg := range s.serverSegr {
+			newSegs := make([]segment, 0, len(s.serverSegs))
+			for _, seg := range s.serverSegs {
 				if rem <= 0 {
 					newSegs = append(newSegs, seg)
 					continue
@@ -233,53 +325,21 @@ func (s *TCPStream) parseServerBuffer() {
 					rem -= seg.length
 				}
 			}
-			s.serverSegr = newSegs
+			s.serverSegs = newSegs
 		}
 	}
 }
 
-// assignCommandComplete выставляет CommandCompleteTimestamp для первой незавершённой
-// записи в s.completed.
 func (s *TCPStream) assignCommandComplete(ts time.Time) {
-	for i := range s.completed {
-		if s.completed[i].CommandCompleteTimestamp.IsZero() {
-			s.completed[i].CommandCompleteTimestamp = ts
-			return
-		}
-	}
+	s.completed[s.needCommandCompleteIndex].CommandCompleteTimestamp = ts
+	s.needCommandCompleteIndex++
 }
 
-// timestampForClientOffset возвращает время сегмента клиента, содержащего байт с указанным offset.
-func (s *TCPStream) timestampForClientOffset(offset uint32) time.Time {
-	if offset < 0 {
-		return time.Time{}
-	}
-	var acc uint32 = 0
-	for _, seg := range s.clientSegr {
-		if offset < acc+seg.length {
-			return seg.ts
-		}
-		acc += seg.length
-	}
-	return time.Time{}
+func (s *TCPStream) assignReadyForQuery(ts time.Time) {
+	s.completed[s.needReadyForQueryIndex].ReadyForQueryTimestamp = ts
+	s.needReadyForQueryIndex++
 }
 
-// timestampForServerOffset возвращает время сегмента сервера, содержащего байт с указанным offset.
-func (s *TCPStream) timestampForServerOffset(offset uint32) time.Time {
-	if offset < 0 {
-		return time.Time{}
-	}
-	var acc uint32 = 0
-	for _, seg := range s.serverSegr {
-		if offset < acc+seg.length {
-			return seg.ts
-		}
-		acc += seg.length
-	}
-	return time.Time{}
-}
-
-// ExtractPrettyQuery возвращает строку с запросом.
-func ExtractPrettyQuery(data []byte) string {
-	return strings.TrimSpace(string(data[:len(data)-1]))
+func (s *TCPStream) clientMessageType() msgtypes.ClientMessageType {
+	return msgtypes.ClientMessageType(s.clientBuf[0])
 }

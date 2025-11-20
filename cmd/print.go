@@ -6,7 +6,6 @@ import (
 	"net"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -103,8 +102,11 @@ var PrintCmd = &cobra.Command{
 				}
 			}
 
-			flowKey := fmt.Sprintf("%s:%d->%s:%d", pkt.IPSource, pkt.PortSource, pkt.IPDest, pkt.PortDest)
-			manager.AddPacket(flowKey, pkt.Data, pkt.Timestamp, pkt.IPSource, pkt.IPDest, pkt.PortSource, pkt.PortDest, PcapPostgresPort)
+			if err := manager.AddPacket(
+				pkt.Data, pkt.Timestamp, pkt.IPSource, pkt.IPDest, pkt.PortSource, pkt.PortDest, PcapPostgresHost, PcapPostgresPort,
+			); err != nil {
+				log.Printf("AddPacket error: %v", err)
+			}
 		}
 
 		messages := manager.CollectMessages()
@@ -114,13 +116,10 @@ var PrintCmd = &cobra.Command{
 		})
 
 		for i, m := range messages {
-			typ := "<len-only>"
-			if m.Type != 0 {
-				typ = m.Type.String()
-			}
-			query := stream.ExtractPrettyQuery(m.Payload)
-			if query == "" {
-				query = "-"
+			typ := m.Type.String()
+			query := "-"
+			if m.Type.IsSimpleQuery() {
+				query = m.PrettyQuery()
 			}
 			fmt.Printf("%3d | %s | %s | %s\n",
 				i+1,
@@ -128,9 +127,6 @@ var PrintCmd = &cobra.Command{
 				typ,
 				query,
 			)
-			if !m.CommandCompleteTimestamp.IsZero() {
-				log.Printf("message %d has CommandComplete at %s", i+1, m.CommandCompleteTimestamp.Format(time.RFC3339Nano))
-			}
 		}
 		return nil
 	},

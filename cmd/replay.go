@@ -9,7 +9,6 @@ import (
 	_ "github.com/google/gopacket/pcap"
 	"github.com/spf13/cobra"
 
-	"trafRep/internal/models"
 	pcappkg "trafRep/internal/pcap"
 	"trafRep/internal/replay"
 	"trafRep/internal/stream"
@@ -45,8 +44,12 @@ var ReplayCmd = &cobra.Command{
 		manager := stream.NewTCPStreamManager()
 
 		for _, pkt := range packets {
-			manager.AddPacket(fmt.Sprintf("%s:%d->%s:%d", pkt.IPSource, pkt.PortSource, pkt.IPDest, pkt.PortDest),
-				pkt.Data, pkt.Timestamp, pkt.IPSource, pkt.IPDest, pkt.PortSource, pkt.PortDest, PcapPostgresPort)
+
+			if err := manager.AddPacket(
+				pkt.Data, pkt.Timestamp, pkt.IPSource, pkt.IPDest, pkt.PortSource, pkt.PortDest, PcapPostgresHost, PcapPostgresPort,
+			); err != nil {
+				log.Printf("AddPacket error: %v", err)
+			}
 		}
 
 		messages := manager.CollectMessages()
@@ -60,7 +63,7 @@ var ReplayCmd = &cobra.Command{
 			return nil
 		}
 
-		cfg := models.ReplayConfig{
+		cfg := replay.Config{
 			TargetHost: replayTargetHost,
 			TargetPort: replayTargetPort,
 			Rate:       replayRate,

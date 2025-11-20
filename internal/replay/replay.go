@@ -12,9 +12,16 @@ import (
 	"strings"
 	"time"
 
-	"trafRep/internal/models"
 	"trafRep/internal/stream"
 )
+
+type Config struct {
+	TargetHost string
+	TargetPort int
+	Rate       float64
+	PrintQuery bool
+	MaxRetries int
+}
 
 // connectTCP устанавливает TCP‑соединение с указанным адресом и возвращает net.Conn.
 func connectTCP(targetHost string, targetPort int) (net.Conn, error) {
@@ -99,7 +106,7 @@ func waitForReady(conn net.Conn, readTimeout time.Duration) error {
 // Временные интервалы между сообщениями масштабируются по config.Rate.
 // Если config.Rate == 1.0 — используются оригинальные интервалы (точное время).
 // После отправки каждого клиентского сообщения функция ждёт серверное ReadyForQuery ('Z').
-func ReplayMessages(messages []models.PostgreSQLMessage, config models.ReplayConfig) error {
+func ReplayMessages(messages []stream.PostgreSQLMessage, config Config) error {
 	if len(messages) == 0 {
 		return fmt.Errorf("no messages to replay")
 	}
@@ -115,7 +122,7 @@ func ReplayMessages(messages []models.PostgreSQLMessage, config models.ReplayCon
 	}
 
 	var successCount, errorCount int
-	readyTimeout := 5 * time.Second
+	readyTimeout := 40 * time.Second
 
 	firstTime := messages[0].FirstTCPPacketTimestamp
 	replayStart := time.Now()
@@ -124,7 +131,7 @@ func ReplayMessages(messages []models.PostgreSQLMessage, config models.ReplayCon
 		targetOffset := time.Duration(float64(m.FirstTCPPacketTimestamp.Sub(firstTime)) / config.Rate)
 		targetTime := replayStart.Add(targetOffset)
 		if wait := time.Until(targetTime); wait > 0 {
-			time.Sleep(wait)
+			//time.Sleep(wait)
 		}
 
 		if conn == nil {
@@ -176,7 +183,7 @@ func ReplayMessages(messages []models.PostgreSQLMessage, config models.ReplayCon
 		msg := fmt.Sprintf("Message %d/%d SUCCESS - %d bytes, Type: %s", i+1, len(messages), len(row), m.Type.String())
 		if config.PrintQuery && m.Type.IsSimpleQuery() {
 			msg += fmt.Sprintf(
-				", QUERY: %s", stream.ExtractPrettyQuery(m.Payload),
+				", QUERY: %s", m.PrettyQuery(),
 			)
 		}
 		fmt.Println(msg)
