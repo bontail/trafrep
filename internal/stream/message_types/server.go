@@ -3,8 +3,6 @@ package message_types
 type ServerMessageType byte
 
 const (
-	// MessageTypeCommandComplete
-	// server -> client
 	MessageTypeCommandComplete        ServerMessageType = 'C'
 	MessageTypeReadyForQuery          ServerMessageType = 'Z'
 	MessageTypeAuthRequest            ServerMessageType = 'R'
@@ -29,4 +27,12 @@ func (mt ServerMessageType) String() string {
 		return s
 	}
 	return string(mt)
+}
+
+func (mt ServerMessageType) IsCommandComplete() bool {
+	return mt == MessageTypeCommandComplete
+}
+
+func (mt ServerMessageType) IsReadyForQuery() bool {
+	return mt == MessageTypeReadyForQuery
 }

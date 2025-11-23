@@ -5,8 +5,6 @@ import "strings"
 type ClientMessageType byte
 
 const (
-	// MessageTypeQuery
-	// client -> server
 	MessageTypeQuery                ClientMessageType = 'Q'
 	MessageTypeParse                ClientMessageType = 'P'
 	MessageTypeBind                 ClientMessageType = 'B'
