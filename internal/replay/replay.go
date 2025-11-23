@@ -16,11 +16,12 @@ import (
 )
 
 type Config struct {
-	TargetHost string
-	TargetPort int
-	Rate       float64
-	PrintQuery bool
-	MaxRetries int
+	TargetHost  string
+	TargetPort  int
+	Rate        float64
+	PrintQuery  bool
+	MaxRetries  int
+	ReadTimeout time.Duration
 }
 
 // connectTCP устанавливает TCP‑соединение с указанным адресом и возвращает net.Conn.
@@ -122,7 +123,6 @@ func ReplayMessages(messages []stream.PostgreSQLMessage, config Config) error {
 	}
 
 	var successCount, errorCount int
-	readyTimeout := 40 * time.Second
 
 	firstTime := messages[0].FirstTCPPacketTimestamp
 	replayStart := time.Now()
@@ -169,7 +169,7 @@ func ReplayMessages(messages []stream.PostgreSQLMessage, config Config) error {
 		}
 
 		if i != len(messages)-1 {
-			if err := waitForReady(conn, readyTimeout); err != nil {
+			if err := waitForReady(conn, config.ReadTimeout); err != nil {
 				errorCount++
 				log.Printf("Message %d ERROR - waiting ReadyForQuery failed: %v", i+1, err)
 				_ = conn.Close()

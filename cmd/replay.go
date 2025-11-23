@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"sort"
+	"time"
 
 	_ "github.com/google/gopacket/pcap"
 	"github.com/spf13/cobra"
@@ -15,11 +16,12 @@ import (
 )
 
 var (
-	replayTargetHost string
-	replayTargetPort int
-	replayRate       float64
-	replayPrintQuery bool // новый флаг: печатать запросы при успешной отправке
-	replayMaxRetries int  // new flag: max retries for write attempts
+	replayTargetHost         string
+	replayTargetPort         int
+	replayRate               float64
+	replayPrintQuery         bool
+	replayMaxRetries         int
+	replayReadTimeoutSeconds int
 )
 
 // ReplayCmd собирает PostgreSQL‑сообщения из pcap и воспроизводит их на target-host:target-port.
@@ -34,11 +36,16 @@ var ReplayCmd = &cobra.Command{
 		defer handle.Close()
 
 		filterIP := net.ParseIP(PcapPostgresHost)
-		packets := pcappkg.ExtractPackets(handle, filterIP, PcapPostgresPort)
+		packets := pcappkg.ExtractPackets(
+			handle,
+			filterIP,
+			PcapPostgresPort,
+		)
 		log.Printf("Extracted %d tcp packets", len(packets))
 
 		sort.Slice(packets, func(i, j int) bool {
-			return packets[i].Timestamp.Before(packets[j].Timestamp)
+			return packets[i].Timestamp.
+				Before(packets[j].Timestamp)
 		})
 
 		manager := stream.NewTCPStreamManager()
@@ -46,7 +53,14 @@ var ReplayCmd = &cobra.Command{
 		for _, pkt := range packets {
 
 			if err := manager.AddPacket(
-				pkt.Data, pkt.Timestamp, pkt.IPSource, pkt.IPDest, pkt.PortSource, pkt.PortDest, PcapPostgresHost, PcapPostgresPort,
+				pkt.Data,
+				pkt.Timestamp,
+				pkt.IPSource,
+				pkt.IPDest,
+				pkt.PortSource,
+				pkt.PortDest,
+				PcapPostgresHost,
+				PcapPostgresPort,
 			); err != nil {
 				log.Printf("AddPacket error: %v", err)
 			}
@@ -55,7 +69,8 @@ var ReplayCmd = &cobra.Command{
 		messages := manager.CollectMessages()
 
 		sort.Slice(messages, func(i, j int) bool {
-			return messages[i].FirstTCPPacketTimestamp.Before(messages[j].FirstTCPPacketTimestamp)
+			return messages[i].FirstTCPPacketTimestamp.
+				Before(messages[j].FirstTCPPacketTimestamp)
 		})
 
 		if len(messages) == 0 {
@@ -64,11 +79,12 @@ var ReplayCmd = &cobra.Command{
 		}
 
 		cfg := replay.Config{
-			TargetHost: replayTargetHost,
-			TargetPort: replayTargetPort,
-			Rate:       replayRate,
-			PrintQuery: replayPrintQuery,
-			MaxRetries: replayMaxRetries,
+			TargetHost:  replayTargetHost,
+			TargetPort:  replayTargetPort,
+			Rate:        replayRate,
+			PrintQuery:  replayPrintQuery,
+			MaxRetries:  replayMaxRetries,
+			ReadTimeout: time.Second * time.Duration(replayReadTimeoutSeconds),
 		}
 
 		if err := replay.ReplayMessages(messages, cfg); err != nil {
@@ -84,4 +100,5 @@ func init() {
 	ReplayCmd.Flags().Float64Var(&replayRate, "rate", 1.0, "Скорость реплея (1.0 = оригинал)")
 	ReplayCmd.Flags().BoolVar(&replayPrintQuery, "print-query", false, "Печатать текст запроса при успешной отправке (если доступен)")
 	ReplayCmd.Flags().IntVar(&replayMaxRetries, "max-retries", 3, "Максимальное число попыток записи при ошибке")
+	ReplayCmd.Flags().IntVar(&replayReadTimeoutSeconds, "ready-timeout", 5, "Таймаут ожидания ответа сервера в секундах")
 }

@@ -14,7 +14,7 @@ var PcapPostgresPort uint16
 
 var RootCmd = &cobra.Command{
 	Use:   "app",
-	Short: "Трафик репортер",
+	Short: "Трафик повторитель",
 	Long:  "Приложение для анализа и воспроизведения pcap файлов.",
 }
 

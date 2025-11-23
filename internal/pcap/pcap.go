@@ -23,8 +23,8 @@ type TCPPacket struct {
 
 // ExtractPackets читает пакеты из handle и возвращает TCPPacket,
 // соответствующие заданному filterIP и filterPort.
-// Функция возвращает только те пакеты,
-// у которых src или dst совпадает с filterIP и соответствующий порт равен filterPort.
+// Функция возвращает только те пакеты, у которых src или dst совпадает с filterIP и
+// соответствующий порт равен filterPort.
 func ExtractPackets(handle *pcap.Handle, filterIP net.IP, filterPort uint16) []TCPPacket {
 	if filterIP == nil {
 		return nil
@@ -59,8 +59,6 @@ func ExtractPackets(handle *pcap.Handle, filterIP net.IP, filterPort uint16) []T
 
 // getIPs извлекает IP-адреса источника и назначения из переданного networkLayer.
 // Поддерживаются слои *layers.IPv4 и *layers.IPv6.
-// Возвращает src и dst как net.IP. Для неподдерживаемых или отсутствующих сетевых слоёв
-// возвращает (nil, nil).
 func getIPs(networkLayer gopacket.NetworkLayer) (src net.IP, dst net.IP) {
 	switch layer := networkLayer.(type) {
 	case *layers.IPv4:
