@@ -117,6 +117,15 @@ func NewTCPStreamManager() *TCPStreamManager {
 	}
 }
 
+// createKey создаёт уникальный ключ для идентификации TCP-потока.
+func (m *TCPStreamManager) createKey(isFromServer bool, ipSrc, ipDst string, portSrc, portDst uint16) string {
+	key := fmt.Sprintf("%s:%d->%s:%d", ipSrc, portSrc, ipDst, portDst)
+	if isFromServer {
+		key = fmt.Sprintf("%s:%d->%s:%d", ipDst, portDst, ipSrc, portSrc)
+	}
+	return key
+}
+
 // AddPacket добавляет один TCP-пакет в поток с идентификатором key.
 // Данные от клиента накапливаются и из них извлекаются полные PostgreSQL‑сообщения, которые сохраняются во внутреннем
 // срезе completed.
@@ -125,10 +134,7 @@ func NewTCPStreamManager() *TCPStreamManager {
 func (m *TCPStreamManager) AddPacket(data []byte, timestamp time.Time, ipSrc, ipDst string, portSrc, portDst uint16, serverIp string, serverPort uint16) error {
 	isFromServer := ipSrc == serverIp && portSrc == serverPort
 
-	key := fmt.Sprintf("%s:%d->%s:%d", ipSrc, portSrc, ipDst, portDst)
-	if isFromServer {
-		key = fmt.Sprintf("%s:%d->%s:%d", ipDst, portDst, ipSrc, portSrc)
-	}
+	key := m.createKey(isFromServer, ipSrc, ipDst, portSrc, portDst)
 
 	stream, ok := m.streams[key]
 	if !ok {
