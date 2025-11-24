@@ -29,7 +29,7 @@ func (m PostgreSQLMessage) PrettyQuery() string {
 
 // Row возвращает байтовое представление сообщения в том виде, которое нужно отправлять.
 func (m PostgreSQLMessage) Row() []byte {
-	if m.Type.HaveTypeByte() {
+	if m.Type.IsNormalType() {
 		return m.typedByteRow()
 	}
 	return m.untypedByteRow()
@@ -257,7 +257,7 @@ func (s *TCPStream) parseClientBuffer() {
 		var processed int
 
 		msgType := s.clientMessageType()
-		if msgType.HaveTypeByte() {
+		if msgType.IsNormalType() {
 			msg, processed = s.tryCreateClientTypedMessage()
 		} else {
 			msg, processed = s.tryCreateClientUntypedMessage()
@@ -302,7 +302,7 @@ func (s *TCPStream) clearServerProcessedBytes(processed int) {
 }
 
 // parseServerBuffer извлекает серверные сообщения из serverBuf и для каждого
-// сообщения типа 'C' (CommandComplete) назначает CommandCompleteTimestamp для первой
+// сообщения типа CommandComplete назначает CommandCompleteTimestamp для первой
 // незавершённой клиентской записи в s.completed.
 func (s *TCPStream) parseServerBuffer() {
 	for len(s.serverBuf) > 4 {

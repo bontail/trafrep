@@ -18,7 +18,7 @@ const (
 	MessageTypeFunctionCall         ClientMessageType = 'F'
 	MessageTypeFunctionCallResponse ClientMessageType = 'V'
 	MessageTypePasswordMessage      ClientMessageType = 'p'
-	ClientMessageTypeOnlyLength     ClientMessageType = 0 // для сообщений без типа, только с длиной
+	ClientMessageTypeOnlyLength     ClientMessageType = 0
 )
 
 var clientMessageTypeNames = map[ClientMessageType]string{
@@ -43,7 +43,7 @@ func (mt ClientMessageType) String() string {
 	if s, ok := clientMessageTypeNames[mt]; ok {
 		sb.WriteString(s)
 	}
-	if mt.HaveTypeByte() {
+	if mt.IsNormalType() {
 		sb.WriteString(" (" + string(mt) + ")")
 	}
 	return sb.String()
@@ -53,8 +53,9 @@ func (mt ClientMessageType) IsSimpleQuery() bool {
 	return mt == MessageTypeQuery
 }
 
-func (mt ClientMessageType) HaveTypeByte() bool {
-	return mt != ClientMessageTypeOnlyLength
+func (mt ClientMessageType) IsNormalType() bool {
+	_, ok := clientMessageTypeNames[mt]
+	return mt != ClientMessageTypeOnlyLength && ok
 }
 
 func (mt ClientMessageType) NeedCommandCompleteAnswer() bool {

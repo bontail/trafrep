@@ -20,7 +20,6 @@ var (
 	replayTargetPort         int
 	replayRate               float64
 	replayPrintQuery         bool
-	replayMaxRetries         int
 	replayReadTimeoutSeconds int
 )
 
@@ -83,7 +82,6 @@ var ReplayCmd = &cobra.Command{
 			TargetPort:  replayTargetPort,
 			Rate:        replayRate,
 			PrintQuery:  replayPrintQuery,
-			MaxRetries:  replayMaxRetries,
 			ReadTimeout: time.Second * time.Duration(replayReadTimeoutSeconds),
 		}
 
@@ -99,6 +97,5 @@ func init() {
 	ReplayCmd.Flags().IntVar(&replayTargetPort, "target-port", 5432, "Target port для воспроизведения")
 	ReplayCmd.Flags().Float64Var(&replayRate, "rate", 1.0, "Скорость реплея (1.0 = оригинал)")
 	ReplayCmd.Flags().BoolVar(&replayPrintQuery, "print-query", false, "Печатать текст запроса при успешной отправке (если доступен)")
-	ReplayCmd.Flags().IntVar(&replayMaxRetries, "max-retries", 3, "Максимальное число попыток записи при ошибке")
 	ReplayCmd.Flags().IntVar(&replayReadTimeoutSeconds, "ready-timeout", 5, "Таймаут ожидания ответа сервера в секундах")
 }
