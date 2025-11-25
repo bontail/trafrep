@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"sort"
 	"time"
 
 	"trafRep/internal/stream"
@@ -143,15 +142,10 @@ func processUntypedServerMessage(data []byte) (processedData int, err error) {
 
 // ReplayMessages сортирует сообщения по времени и воспроизводит их через TCP.
 // После отправки некоторых клиентских сообщений функция ждёт серверное ReadyForQuery.
-func ReplayMessages(messages []stream.PostgreSQLMessage, config Config) error {
+func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replayStart time.Time) error {
 	if len(messages) == 0 {
 		return fmt.Errorf("no messages to replay")
 	}
-
-	sort.Slice(messages, func(i, j int) bool {
-		return messages[i].FirstTCPPacketTimestamp.
-			Before(messages[j].FirstTCPPacketTimestamp)
-	})
 
 	conn, err := connectTCP(config.TargetHost, config.TargetPort)
 	if err != nil {
@@ -160,8 +154,6 @@ func ReplayMessages(messages []stream.PostgreSQLMessage, config Config) error {
 	defer conn.Close()
 
 	firstTime := messages[0].FirstTCPPacketTimestamp
-	replayStart := time.Now()
-
 	firstMessage := messages[0]
 	_, writeErr := conn.Write(firstMessage.Row())
 	if writeErr != nil {

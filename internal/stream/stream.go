@@ -63,6 +63,7 @@ type TCPStream struct {
 	completed                []PostgreSQLMessage
 	needCommandCompleteIndex int
 	needReadyForQueryIndex   int
+	HaveAllMessages          bool
 }
 
 // NewTCPStream создаёт и возвращает новый экземпляр TCPStream.
@@ -74,15 +75,6 @@ func NewTCPStream() *TCPStream {
 		serverSegs: make([]segment, 0),
 		completed:  make([]PostgreSQLMessage, 0),
 	}
-}
-
-// Reset очищает все внутренние буферы и сегменты TCPStream.
-func (s *TCPStream) Reset() {
-	s.clientBuf = s.clientBuf[:0]
-	s.clientSegs = s.clientSegs[:0]
-	s.serverBuf = s.serverBuf[:0]
-	s.serverSegs = s.serverSegs[:0]
-	s.completed = s.completed[:0]
 }
 
 // segment представляет один TCP пакет с его длиной и временной меткой.
@@ -107,39 +99,39 @@ func (s segments) timestampByOffset(offset int) time.Time {
 // TCPStreamManager управляет множеством TCPStream и обеспечивает
 // сборку полных PostgreSQL‑сообщений и связывание CommandComplete.
 type TCPStreamManager struct {
-	streams map[string]*TCPStream
+	activeStreams    map[string]*TCPStream
+	completedStreams []*TCPStream
 }
 
 // NewTCPStreamManager создаёт и возвращает новый менеджер TCP-потоков.
 func NewTCPStreamManager() *TCPStreamManager {
 	return &TCPStreamManager{
-		streams: make(map[string]*TCPStream),
+		activeStreams: make(map[string]*TCPStream),
 	}
 }
 
-// createKey создаёт уникальный ключ для идентификации TCP-потока.
-func (m *TCPStreamManager) createKey(isFromServer bool, ipSrc, ipDst string, portSrc, portDst uint16) string {
-	key := fmt.Sprintf("%s:%d->%s:%d", ipSrc, portSrc, ipDst, portDst)
-	if isFromServer {
-		key = fmt.Sprintf("%s:%d->%s:%d", ipDst, portDst, ipSrc, portSrc)
+// GetCompletedStreamMessages возвращает срез из срезов всех завершённых сообщений.
+func (m *TCPStreamManager) GetCompletedStreamMessages() [][]PostgreSQLMessage {
+	var allMessages [][]PostgreSQLMessage
+	for _, stream := range m.completedStreams {
+		allMessages = append(allMessages, stream.completed)
 	}
-	return key
+	return allMessages
 }
 
 // AddPacket добавляет один TCP-пакет в поток с идентификатором key.
 // Данные от клиента накапливаются и из них извлекаются полные PostgreSQL‑сообщения, которые сохраняются во внутреннем
 // срезе completed.
 // Данные от сервера накапливаются и сканируются на предмет сообщений типа CommandComplete и ReadyForQuery.
-// Для найденного типа выставляется Timestamp для первой незавершённой клиентской записи в completed.
 func (m *TCPStreamManager) AddPacket(data []byte, timestamp time.Time, ipSrc, ipDst string, portSrc, portDst uint16, serverIp string, serverPort uint16) error {
 	isFromServer := ipSrc == serverIp && portSrc == serverPort
 
 	key := m.createKey(isFromServer, ipSrc, ipDst, portSrc, portDst)
 
-	stream, ok := m.streams[key]
+	stream, ok := m.activeStreams[key]
 	if !ok {
 		stream = NewTCPStream()
-		m.streams[key] = stream
+		m.activeStreams[key] = stream
 	}
 
 	if data == nil {
@@ -155,22 +147,21 @@ func (m *TCPStreamManager) AddPacket(data []byte, timestamp time.Time, ipSrc, ip
 		stream.addClientData(data, timestamp)
 	}
 
+	if stream.HaveAllMessages {
+		m.completedStreams = append(m.completedStreams, stream)
+		delete(m.activeStreams, key)
+	}
+
 	return nil
 }
 
-// CollectMessages возвращает все собранные клиентские сообщения из текущих потоков.
-// После возврата сообщения и все внутренние буферы/сегменты потока очищаются,
-// а поток удаляется из менеджера (освобождение памяти и сброс состояния).
-func (m *TCPStreamManager) CollectMessages() []PostgreSQLMessage {
-	var out []PostgreSQLMessage
-	for key, s := range m.streams {
-		if len(s.completed) > 0 {
-			out = append(out, s.completed...)
-		}
-		s.Reset()
-		delete(m.streams, key)
+// createKey создаёт уникальный ключ для идентификации TCP-потока.
+func (m *TCPStreamManager) createKey(isFromServer bool, ipSrc, ipDst string, portSrc, portDst uint16) string {
+	key := fmt.Sprintf("%s:%d->%s:%d", ipSrc, portSrc, ipDst, portDst)
+	if isFromServer {
+		key = fmt.Sprintf("%s:%d->%s:%d", ipDst, portDst, ipSrc, portSrc)
 	}
-	return out
+	return key
 }
 
 // addClientData добавляет данные от клиента в буфер потока и регистрирует сегмент с меткой времени,
@@ -275,6 +266,10 @@ func (s *TCPStream) parseClientBuffer() {
 		}
 		s.completed = append(s.completed, msg)
 		s.clearClientProcessedBytes(processed)
+		if msgType.IsLastMessage() {
+			s.HaveAllMessages = true
+			break
+		}
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"sort"
+	"sync"
 	"time"
 
 	_ "github.com/google/gopacket/pcap"
@@ -65,14 +66,9 @@ var ReplayCmd = &cobra.Command{
 			}
 		}
 
-		messages := manager.CollectMessages()
+		streams := manager.GetCompletedStreamMessages()
 
-		sort.Slice(messages, func(i, j int) bool {
-			return messages[i].FirstTCPPacketTimestamp.
-				Before(messages[j].FirstTCPPacketTimestamp)
-		})
-
-		if len(messages) == 0 {
+		if len(streams) == 0 {
 			log.Printf("no messages extracted, nothing to replay")
 			return nil
 		}
@@ -85,9 +81,16 @@ var ReplayCmd = &cobra.Command{
 			ReadTimeout: time.Second * time.Duration(replayReadTimeoutSeconds),
 		}
 
-		if err := replay.ReplayMessages(messages, cfg); err != nil {
-			return fmt.Errorf("replay failed: %w", err)
+		replayStart := time.Now()
+		var wg sync.WaitGroup
+		for _, stream := range streams {
+			wg.Go(func() {
+				if err := replay.ReplayMessages(stream, cfg, replayStart); err != nil {
+					log.Printf("replay stream error: %v", err)
+				}
+			})
 		}
+		wg.Wait()
 		return nil
 	},
 }

@@ -65,3 +65,7 @@ func (mt ClientMessageType) NeedCommandCompleteAnswer() bool {
 func (mt ClientMessageType) NeedReadyForQueryAnswer() bool {
 	return mt == MessageTypeQuery
 }
+
+func (mt ClientMessageType) IsLastMessage() bool {
+	return mt == MessageTypeTerminate
+}

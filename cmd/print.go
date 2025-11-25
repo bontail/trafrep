@@ -109,7 +109,11 @@ var PrintCmd = &cobra.Command{
 			}
 		}
 
-		messages := manager.CollectMessages()
+		streams := manager.GetCompletedStreamMessages()
+		var messages []stream.PostgreSQLMessage
+		for _, s := range streams {
+			messages = append(messages, s...)
+		}
 
 		sort.Slice(messages, func(i, j int) bool {
 			return messages[i].FirstTCPPacketTimestamp.Before(messages[j].FirstTCPPacketTimestamp)
