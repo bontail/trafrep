@@ -81,11 +81,18 @@ var ReplayCmd = &cobra.Command{
 			ReadTimeout: time.Second * time.Duration(replayReadTimeoutSeconds),
 		}
 
+		startedMessageTime := streams[0][0].FirstTCPPacketTimestamp
+		for _, stream := range streams {
+			if stream[0].FirstTCPPacketTimestamp.Before(startedMessageTime) {
+				startedMessageTime = stream[0].FirstTCPPacketTimestamp
+			}
+		}
+
 		replayStart := time.Now()
 		var wg sync.WaitGroup
 		for _, stream := range streams {
 			wg.Go(func() {
-				if err := replay.ReplayMessages(stream, cfg, replayStart); err != nil {
+				if err := replay.ReplayMessages(stream, cfg, replayStart, startedMessageTime); err != nil {
 					log.Printf("replay stream error: %v", err)
 				}
 			})

@@ -142,9 +142,18 @@ func processUntypedServerMessage(data []byte) (processedData int, err error) {
 
 // ReplayMessages сортирует сообщения по времени и воспроизводит их через TCP.
 // После отправки некоторых клиентских сообщений функция ждёт серверное ReadyForQuery.
-func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replayStart time.Time) error {
+func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replayStartTime time.Time, startedMessageTime time.Time) error {
 	if len(messages) == 0 {
 		return fmt.Errorf("no messages to replay")
+	}
+	firstMessage := messages[0]
+
+	waitTarget := replayStartTime.Add(
+		firstMessage.FirstTCPPacketTimestamp.Sub(startedMessageTime),
+	)
+	waitTarget = waitTarget.Add(-100 * time.Microsecond) // небольшая задержка из-за учета установки соединения
+	if wait := time.Until(waitTarget); wait > 0 {
+		time.Sleep(wait)
 	}
 
 	conn, err := connectTCP(config.TargetHost, config.TargetPort)
@@ -153,8 +162,6 @@ func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replaySt
 	}
 	defer conn.Close()
 
-	firstTime := messages[0].FirstTCPPacketTimestamp
-	firstMessage := messages[0]
 	_, writeErr := conn.Write(firstMessage.Row())
 	if writeErr != nil {
 		return fmt.Errorf("message %d ERROR - write failed: %v", 1, writeErr)
@@ -167,8 +174,8 @@ func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replaySt
 
 	for i := 1; i < len(messages)-1; i++ {
 		m := messages[i]
-		targetOffset := time.Duration(float64(m.FirstTCPPacketTimestamp.Sub(firstTime)) / config.Rate)
-		targetTime := replayStart.Add(targetOffset)
+		targetOffset := time.Duration(float64(m.FirstTCPPacketTimestamp.Sub(startedMessageTime)) / config.Rate)
+		targetTime := replayStartTime.Add(targetOffset)
 		if wait := time.Until(targetTime); wait > 0 {
 			time.Sleep(wait)
 		}
@@ -194,8 +201,8 @@ func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replaySt
 	}
 
 	lastMessage := messages[len(messages)-1]
-	targetOffset := time.Duration(float64(lastMessage.FirstTCPPacketTimestamp.Sub(firstTime)) / config.Rate)
-	targetTime := replayStart.Add(targetOffset)
+	targetOffset := time.Duration(float64(lastMessage.FirstTCPPacketTimestamp.Sub(startedMessageTime)) / config.Rate)
+	targetTime := replayStartTime.Add(targetOffset)
 	if wait := time.Until(targetTime); wait > 0 {
 		time.Sleep(wait)
 	}
@@ -205,7 +212,7 @@ func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replaySt
 	}
 	fmt.Printf("Message %d/%d SUCCESS - %d bytes, Type: %s\n", len(messages), len(messages), len(lastMessage.Row()), lastMessage.Type.String())
 
-	total := time.Since(replayStart)
+	total := time.Since(replayStartTime)
 	_, err = fmt.Fprintf(os.Stdout, "Replay completed: %d messages, total time: %v\n",
 		len(messages), total)
 	if err != nil {
