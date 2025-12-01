@@ -3,27 +3,29 @@ package message_types
 type ServerMessageType byte
 
 const (
-	MessageTypeCommandComplete  ServerMessageType = 'C'
-	MessageTypeReadyForQuery    ServerMessageType = 'Z'
-	MessageTypeAuthOK           ServerMessageType = 'R'
-	MessageTypeErrorResponse    ServerMessageType = 'E'
-	MessageTypeRowDescription   ServerMessageType = 'T'
-	MessageTypeDataRow          ServerMessageType = 'D'
-	MessageTypeParameterStatus  ServerMessageType = 'S'
-	MessageTypeBackendKeyData   ServerMessageType = 'K'
-	ServerMessageTypeOnlyLength ServerMessageType = 0
+	CommandComplete      ServerMessageType = 'C'
+	ReadyForQuery        ServerMessageType = 'Z'
+	AuthenticationOK     ServerMessageType = 'R'
+	ErrorResponse        ServerMessageType = 'E'
+	RowDescription       ServerMessageType = 'T'
+	DataRow              ServerMessageType = 'D'
+	ParameterStatus      ServerMessageType = 'S'
+	BackendKeyData       ServerMessageType = 'K'
+	FunctionCallResponse ServerMessageType = 'V'
+	ServerOnlyLength     ServerMessageType = 0
 )
 
 var serverMessageTypeNames = map[ServerMessageType]string{
-	MessageTypeCommandComplete:  "CommandComplete",
-	MessageTypeReadyForQuery:    "ReadyForQuery",
-	MessageTypeAuthOK:           "Authentication",
-	MessageTypeErrorResponse:    "ErrorResponse",
-	MessageTypeRowDescription:   "RowDescription",
-	MessageTypeDataRow:          "DataRow",
-	MessageTypeParameterStatus:  "ParameterStatus",
-	MessageTypeBackendKeyData:   "BackendKeyData",
-	ServerMessageTypeOnlyLength: "<len-only>",
+	CommandComplete:      "CommandComplete",
+	ReadyForQuery:        "ReadyForQuery",
+	AuthenticationOK:     "Authentication",
+	ErrorResponse:        "ErrorResponse",
+	RowDescription:       "RowDescription",
+	DataRow:              "DataRow",
+	ParameterStatus:      "ParameterStatus",
+	BackendKeyData:       "BackendKeyData",
+	FunctionCallResponse: "FunctionCallResponse",
+	ServerOnlyLength:     "<len-only>",
 }
 
 func (mt ServerMessageType) String() string {
@@ -34,14 +36,14 @@ func (mt ServerMessageType) String() string {
 }
 
 func (mt ServerMessageType) IsCommandComplete() bool {
-	return mt == MessageTypeCommandComplete
+	return mt == CommandComplete
 }
 
 func (mt ServerMessageType) IsReadyForQuery() bool {
-	return mt == MessageTypeReadyForQuery
+	return mt == ReadyForQuery
 }
 
 func (mt ServerMessageType) IsNormalType() bool {
 	_, ok := serverMessageTypeNames[mt]
-	return mt != ServerMessageTypeOnlyLength && ok
+	return mt != ServerOnlyLength && ok
 }

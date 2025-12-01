@@ -151,7 +151,7 @@ func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replaySt
 	if writeErr != nil {
 		return fmt.Errorf("message %d ERROR - write failed: %v", 1, writeErr)
 	}
-	if err = waitServerMessage(conn, config.ReadTimeout, message_types.MessageTypeStartMessage); err != nil {
+	if err = waitServerMessage(conn, config.ReadTimeout, message_types.StartMessage); err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("message %d ERROR - waiting server message failed: %v", 1, err)
 	}

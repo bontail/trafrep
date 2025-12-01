@@ -224,7 +224,7 @@ func (s *TCPStream) tryCreateClientUntypedMessage() (msg PostgreSQLMessage, proc
 		CommandCompleteTimestamp: time.Time{},
 		Len:                      uint32(dataLen),
 		Payload:                  payload,
-		Type:                     msgtypes.ClientMessageTypeOnlyLength,
+		Type:                     msgtypes.ClientOnlyLength,
 	}, dataLen
 
 }
@@ -266,7 +266,7 @@ func (s *TCPStream) parseClientBuffer() {
 		}
 		s.completed = append(s.completed, msg)
 		s.clearClientProcessedBytes(processed)
-		if msgType.IsLastMessage() {
+		if msgType == msgtypes.Terminate {
 			s.HaveAllMessages = true
 			break
 		}

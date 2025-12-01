@@ -5,48 +5,46 @@ import "strings"
 type ClientMessageType byte
 
 const (
-	MessageTypeQuery                ClientMessageType = 'Q'
-	MessageTypeParse                ClientMessageType = 'P'
-	MessageTypeBind                 ClientMessageType = 'B'
-	MessageTypeExecute              ClientMessageType = 'E'
-	MessageTypeSync                 ClientMessageType = 'S'
-	MessageTypeTerminate            ClientMessageType = 'X'
-	MessageTypeCopyData             ClientMessageType = 'd'
-	MessageTypeCopyFail             ClientMessageType = 'f'
-	MessageTypeDescribe             ClientMessageType = 'D'
-	MessageTypeFlush                ClientMessageType = 'H'
-	MessageTypeFunctionCall         ClientMessageType = 'F'
-	MessageTypeFunctionCallResponse ClientMessageType = 'V'
-	MessageTypePasswordMessage      ClientMessageType = 'p'
-	ClientMessageTypeOnlyLength     ClientMessageType = 0
-	MessageTypeStartMessage         ClientMessageType = 255 // стартовое сообщение не имеет числового значения,
+	Query            ClientMessageType = 'Q'
+	Parse            ClientMessageType = 'P'
+	Bind             ClientMessageType = 'B'
+	Execute          ClientMessageType = 'E'
+	Sync             ClientMessageType = 'S'
+	Terminate        ClientMessageType = 'X'
+	CopyData         ClientMessageType = 'd'
+	CopyFail         ClientMessageType = 'f'
+	Describe         ClientMessageType = 'D'
+	Flush            ClientMessageType = 'H'
+	FunctionCall     ClientMessageType = 'F'
+	PasswordMessage  ClientMessageType = 'p'
+	ClientOnlyLength ClientMessageType = 0
+	StartMessage     ClientMessageType = 255 // стартовое сообщение не имеет числового значения,
 	// значение выбрано случайно
 )
 
 var clientMessageTypeNames = map[ClientMessageType]string{
-	MessageTypeQuery:                "Query",
-	MessageTypeParse:                "Parse",
-	MessageTypeBind:                 "Bind",
-	MessageTypeExecute:              "Execute",
-	MessageTypeSync:                 "Sync",
-	MessageTypeTerminate:            "Terminate",
-	MessageTypeCopyData:             "CopyData",
-	MessageTypeCopyFail:             "CopyFail",
-	MessageTypeDescribe:             "CopyDescribe",
-	MessageTypeFlush:                "Flush",
-	MessageTypeFunctionCall:         "FunctionCall",
-	MessageTypeFunctionCallResponse: "FunctionCallResponse",
-	MessageTypePasswordMessage:      "PasswordMessage",
-	ClientMessageTypeOnlyLength:     "<len-only>",
+	Query:            "Query",
+	Parse:            "Parse",
+	Bind:             "Bind",
+	Execute:          "Execute",
+	Sync:             "Sync",
+	Terminate:        "Terminate",
+	CopyData:         "CopyData",
+	CopyFail:         "CopyFail",
+	Describe:         "CopyDescribe",
+	Flush:            "Flush",
+	FunctionCall:     "FunctionCall",
+	PasswordMessage:  "PasswordMessage",
+	ClientOnlyLength: "<len-only>",
 }
 
 var waitedMessages = map[ClientMessageType]map[ServerMessageType]bool{
-	MessageTypeQuery: {
-		MessageTypeCommandComplete: true,
-		MessageTypeReadyForQuery:   true,
+	Query: {
+		CommandComplete: true,
+		ReadyForQuery:   true,
 	},
-	MessageTypeStartMessage: {
-		MessageTypeReadyForQuery: true,
+	StartMessage: {
+		ReadyForQuery: true,
 	},
 }
 
@@ -62,24 +60,20 @@ func (mt ClientMessageType) String() string {
 }
 
 func (mt ClientMessageType) IsSimpleQuery() bool {
-	return mt == MessageTypeQuery
+	return mt == Query
 }
 
 func (mt ClientMessageType) IsNormalType() bool {
 	_, ok := clientMessageTypeNames[mt]
-	return mt != ClientMessageTypeOnlyLength && ok
+	return mt != ClientOnlyLength && ok
 }
 
 func (mt ClientMessageType) NeedCommandCompleteAnswer() bool {
-	return mt == MessageTypeQuery
+	return mt == Query
 }
 
 func (mt ClientMessageType) NeedReadyForQueryAnswer() bool {
-	return mt == MessageTypeQuery
-}
-
-func (mt ClientMessageType) IsLastMessage() bool {
-	return mt == MessageTypeTerminate
+	return mt == Query
 }
 
 func (mt ClientMessageType) NeedAnswers() map[ServerMessageType]bool {
