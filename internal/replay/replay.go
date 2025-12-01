@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"time"
@@ -28,27 +29,24 @@ func connectTCP(targetHost string, targetPort int) (net.Conn, error) {
 }
 
 // waitServerMessage читает данные из conn до тех пор, пока не будут получены
-// требуемые серверные ответы. Если needCommandComplete==true — ждёт 'C' (CommandComplete),
-// если needReadyForQuery==true — ждёт 'Z' (ReadyForQuery).
-// readTimeout задаёт общий таймаут ожидания. Возвращает ошибку при таймауте,
-// закрытии соединения или других ошибках чтения/парсинга.
-func waitServerMessage(conn net.Conn, readTimeout time.Duration, needCommandComplete, needReadyForQuery bool) error {
+// требуемые серверные ответы.
+// readTimeout задаёт общий таймаут ожидания.
+func waitServerMessage(conn net.Conn, readTimeout time.Duration, clientMsgType message_types.ClientMessageType) error {
 	if conn == nil {
 		return fmt.Errorf("nil connection")
 	}
 
-	if !needCommandComplete && !needReadyForQuery {
+	needAnswers := maps.Clone(clientMsgType.NeedAnswers())
+	if len(needAnswers) < 1 {
 		return nil
 	}
 
 	deadline := time.Now().Add(readTimeout)
 	buf := make([]byte, 0)
 	tmp := make([]byte, 4096)
-	seenCommand := false
-	seenReady := false
 
 	for {
-		if (!needCommandComplete || seenCommand) && (!needReadyForQuery || seenReady) {
+		if len(needAnswers) < 1 {
 			return nil
 		}
 
@@ -84,10 +82,8 @@ func waitServerMessage(conn net.Conn, readTimeout time.Duration, needCommandComp
 				if err != nil {
 					return fmt.Errorf("error processing server message: %w", err)
 				}
-				if msgType.IsCommandComplete() {
-					seenCommand = true
-				} else if msgType.IsReadyForQuery() {
-					seenReady = true
+				if needAnswers[msgType] {
+					delete(needAnswers, msgType)
 				}
 			} else {
 				processed, err = processUntypedServerMessage(buf)
@@ -95,17 +91,6 @@ func waitServerMessage(conn net.Conn, readTimeout time.Duration, needCommandComp
 			buf = buf[processed:]
 		}
 	}
-}
-
-// waitServerMessageByType обёртка вокруг waitServerMessage, которая по типу
-// клиентского сообщения определяет, какие серверные ответы нужно ожидать.
-func waitServerMessageByType(conn net.Conn, readTimeout time.Duration, clientMsgType message_types.ClientMessageType) error {
-	return waitServerMessage(
-		conn,
-		readTimeout,
-		clientMsgType.NeedCommandCompleteAnswer(),
-		clientMsgType.NeedReadyForQueryAnswer(),
-	)
 }
 
 // processTypedServerMessage парсит серверное сообщение с ведущим байтом типа и
@@ -166,7 +151,7 @@ func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replaySt
 	if writeErr != nil {
 		return fmt.Errorf("message %d ERROR - write failed: %v", 1, writeErr)
 	}
-	if err = waitServerMessage(conn, config.ReadTimeout, false, true); err != nil {
+	if err = waitServerMessage(conn, config.ReadTimeout, message_types.MessageTypeStartMessage); err != nil {
 		_ = conn.Close()
 		return fmt.Errorf("message %d ERROR - waiting server message failed: %v", 1, err)
 	}
@@ -186,7 +171,7 @@ func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replaySt
 			return fmt.Errorf("message %d ERROR - write failed: %v", i+1, writeErr)
 		}
 
-		if err = waitServerMessageByType(conn, config.ReadTimeout, m.Type); err != nil {
+		if err = waitServerMessage(conn, config.ReadTimeout, m.Type); err != nil {
 			_ = conn.Close()
 			return fmt.Errorf("message %d ERROR - waiting server message failed: %v", i+1, err)
 		}

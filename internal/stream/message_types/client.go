@@ -19,6 +19,8 @@ const (
 	MessageTypeFunctionCallResponse ClientMessageType = 'V'
 	MessageTypePasswordMessage      ClientMessageType = 'p'
 	ClientMessageTypeOnlyLength     ClientMessageType = 0
+	MessageTypeStartMessage         ClientMessageType = 255 // стартовое сообщение не имеет числового значения,
+	// значение выбрано случайно
 )
 
 var clientMessageTypeNames = map[ClientMessageType]string{
@@ -36,6 +38,16 @@ var clientMessageTypeNames = map[ClientMessageType]string{
 	MessageTypeFunctionCallResponse: "FunctionCallResponse",
 	MessageTypePasswordMessage:      "PasswordMessage",
 	ClientMessageTypeOnlyLength:     "<len-only>",
+}
+
+var waitedMessages = map[ClientMessageType]map[ServerMessageType]bool{
+	MessageTypeQuery: {
+		MessageTypeCommandComplete: true,
+		MessageTypeReadyForQuery:   true,
+	},
+	MessageTypeStartMessage: {
+		MessageTypeReadyForQuery: true,
+	},
 }
 
 func (mt ClientMessageType) String() string {
@@ -68,4 +80,8 @@ func (mt ClientMessageType) NeedReadyForQueryAnswer() bool {
 
 func (mt ClientMessageType) IsLastMessage() bool {
 	return mt == MessageTypeTerminate
+}
+
+func (mt ClientMessageType) NeedAnswers() map[ServerMessageType]bool {
+	return waitedMessages[mt]
 }

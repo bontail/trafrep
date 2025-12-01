@@ -5,7 +5,7 @@ type ServerMessageType byte
 const (
 	MessageTypeCommandComplete  ServerMessageType = 'C'
 	MessageTypeReadyForQuery    ServerMessageType = 'Z'
-	MessageTypeAuthRequest      ServerMessageType = 'R'
+	MessageTypeAuthOK           ServerMessageType = 'R'
 	MessageTypeErrorResponse    ServerMessageType = 'E'
 	MessageTypeRowDescription   ServerMessageType = 'T'
 	MessageTypeDataRow          ServerMessageType = 'D'
@@ -17,7 +17,7 @@ const (
 var serverMessageTypeNames = map[ServerMessageType]string{
 	MessageTypeCommandComplete:  "CommandComplete",
 	MessageTypeReadyForQuery:    "ReadyForQuery",
-	MessageTypeAuthRequest:      "Authentication",
+	MessageTypeAuthOK:           "Authentication",
 	MessageTypeErrorResponse:    "ErrorResponse",
 	MessageTypeRowDescription:   "RowDescription",
 	MessageTypeDataRow:          "DataRow",
