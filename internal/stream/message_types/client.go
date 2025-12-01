@@ -69,11 +69,11 @@ func (mt ClientMessageType) IsNormalType() bool {
 }
 
 func (mt ClientMessageType) NeedCommandCompleteAnswer() bool {
-	return mt == Query
+	return mt.NeedAnswers()[CommandComplete]
 }
 
 func (mt ClientMessageType) NeedReadyForQueryAnswer() bool {
-	return mt == Query
+	return mt.NeedAnswers()[ReadyForQuery]
 }
 
 func (mt ClientMessageType) NeedAnswers() map[ServerMessageType]bool {
