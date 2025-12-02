@@ -31,7 +31,7 @@ var clientMessageTypeNames = map[ClientMessageType]string{
 	Terminate:        "Terminate",
 	CopyData:         "CopyData",
 	CopyFail:         "CopyFail",
-	Describe:         "CopyDescribe",
+	Describe:         "Describe",
 	Flush:            "Flush",
 	FunctionCall:     "FunctionCall",
 	PasswordMessage:  "PasswordMessage",
@@ -44,6 +44,9 @@ var waitedMessages = map[ClientMessageType]map[ServerMessageType]bool{
 		ReadyForQuery:   true,
 	},
 	StartMessage: {
+		ReadyForQuery: true,
+	},
+	Sync: {
 		ReadyForQuery: true,
 	},
 }

@@ -88,6 +88,9 @@ func waitServerMessage(conn net.Conn, readTimeout time.Duration, clientMsgType m
 			} else {
 				processed, err = processUntypedServerMessage(buf)
 			}
+			if processed < 1 {
+				break
+			}
 			buf = buf[processed:]
 		}
 	}
@@ -170,7 +173,6 @@ func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replaySt
 		if writeErr != nil {
 			return fmt.Errorf("message %d ERROR - write failed: %v", i+1, writeErr)
 		}
-
 		if err = waitServerMessage(conn, config.ReadTimeout, m.Type); err != nil {
 			_ = conn.Close()
 			return fmt.Errorf("message %d ERROR - waiting server message failed: %v", i+1, err)

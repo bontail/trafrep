@@ -7,7 +7,6 @@ import (
 )
 
 func main() {
-
 	cmd.RootCmd.AddCommand(cmd.PrintCmd)
 	cmd.RootCmd.AddCommand(cmd.ReplayCmd)
 	err := cmd.RootCmd.Execute()

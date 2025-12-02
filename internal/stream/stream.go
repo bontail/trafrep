@@ -234,7 +234,7 @@ func (s *TCPStream) clearClientProcessedBytes(processed int) {
 	s.clientBuf = s.clientBuf[processed:]
 	bytes := uint32(0)
 	checkedSegs := 0
-	for bytes < uint32(processed) {
+	for checkedSegs < len(s.clientSegs) && bytes+s.clientSegs[checkedSegs].length < uint32(processed) {
 		bytes += s.clientSegs[checkedSegs].length
 		checkedSegs++
 	}
@@ -289,7 +289,7 @@ func (s *TCPStream) clearServerProcessedBytes(processed int) {
 	s.serverBuf = s.serverBuf[processed:]
 	bytes := uint32(0)
 	checkedSegs := 0
-	for bytes < uint32(processed) {
+	for checkedSegs < len(s.serverSegs) && bytes+s.serverSegs[checkedSegs].length < uint32(processed) {
 		bytes += s.serverSegs[checkedSegs].length
 		checkedSegs++
 	}
