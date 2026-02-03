@@ -109,7 +109,7 @@ var PrintCmd = &cobra.Command{
 			}
 		}
 
-		streams := manager.GetCompletedStreamMessages()
+		streams := manager.GetStreamMessages()
 		var messages []stream.PostgreSQLMessage
 		for _, s := range streams {
 			messages = append(messages, s...)

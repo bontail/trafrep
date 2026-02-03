@@ -25,8 +25,19 @@ const (
 	NoticeResponse           ServerMessageType = 'N'
 	NotificationResponse     ServerMessageType = 'A'
 	ParameterDescription     ServerMessageType = 't'
-	ServerOnlyLength         ServerMessageType = 0
+	SSLandGSSENCAnswer       ServerMessageType = 0
 )
+
+var SSLandGSSENAnswers = map[byte]bool{
+	'S': true,
+	'G': true,
+	'N': true,
+}
+
+func IsSSLandGSSENCAnswer(b byte) bool {
+	_, ok := SSLandGSSENAnswers[b]
+	return ok
+}
 
 var serverMessageTypeNames = map[ServerMessageType]string{
 	CommandComplete:          "CommandComplete",
@@ -51,14 +62,14 @@ var serverMessageTypeNames = map[ServerMessageType]string{
 	NoticeResponse:           "NoticeResponse",
 	NotificationResponse:     "NotificationResponse",
 	ParameterDescription:     "ParameterDescription",
-	ServerOnlyLength:         "<len-only>",
+	SSLandGSSENCAnswer:       "SSLandGSSENCAnswer",
 }
 
 func (mt ServerMessageType) String() string {
 	if s, ok := serverMessageTypeNames[mt]; ok {
 		return s
 	}
-	return serverMessageTypeNames[ServerOnlyLength]
+	return "InvalidServerMessageType (" + string(mt) + ")"
 }
 
 func (mt ServerMessageType) IsCommandComplete() bool {
@@ -71,5 +82,6 @@ func (mt ServerMessageType) IsReadyForQuery() bool {
 
 func (mt ServerMessageType) IsNormalType() bool {
 	_, ok := serverMessageTypeNames[mt]
-	return mt != ServerOnlyLength && ok
+	return ok &&
+		mt != SSLandGSSENCAnswer
 }

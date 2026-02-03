@@ -66,7 +66,7 @@ var ReplayCmd = &cobra.Command{
 			}
 		}
 
-		streams := manager.GetCompletedStreamMessages()
+		streams := manager.GetStreamMessages()
 
 		if len(streams) == 0 {
 			log.Printf("no messages extracted, nothing to replay")
@@ -90,9 +90,9 @@ var ReplayCmd = &cobra.Command{
 
 		replayStart := time.Now()
 		var wg sync.WaitGroup
-		for _, stream := range streams {
+		for i, stream := range streams {
 			wg.Go(func() {
-				if err := replay.ReplayMessages(stream, cfg, replayStart, startedMessageTime); err != nil {
+				if err := replay.ReplayMessages(stream, cfg, replayStart, startedMessageTime, i); err != nil {
 					log.Printf("replay stream error: %v", err)
 				}
 			})
@@ -107,5 +107,5 @@ func init() {
 	ReplayCmd.Flags().IntVar(&replayTargetPort, "target-port", 5432, "Target port для воспроизведения")
 	ReplayCmd.Flags().Float64Var(&replayRate, "rate", 1.0, "Скорость реплея (1.0 = оригинал)")
 	ReplayCmd.Flags().BoolVar(&replayPrintQuery, "print-query", false, "Печатать текст запроса при успешной отправке (если доступен)")
-	ReplayCmd.Flags().IntVar(&replayReadTimeoutSeconds, "ready-timeout", 5, "Таймаут ожидания ответа сервера в секундах")
+	ReplayCmd.Flags().IntVar(&replayReadTimeoutSeconds, "ready-timeout", 25, "Таймаут ожидания ответа сервера в секундах")
 }

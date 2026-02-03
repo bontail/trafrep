@@ -71,22 +71,23 @@ func waitServerMessage(conn net.Conn, readTimeout time.Duration, clientMsgType m
 		}
 
 		for {
-			if len(buf) < 4 {
+			if len(buf) < 4 && !clientMsgType.IsCipherType() ||
+				len(buf) != 1 && clientMsgType.IsCipherType() {
 				break
 			}
 
-			msgType := message_types.ServerMessageType(buf[0])
+			msgType := serverMessageType(buf[0], clientMsgType)
 			var processed int
 			if msgType.IsNormalType() {
 				processed, err = processTypedServerMessage(buf)
 				if err != nil {
 					return fmt.Errorf("error processing server message: %w", err)
 				}
-				if needAnswers[msgType] {
-					delete(needAnswers, msgType)
-				}
 			} else {
-				processed, err = processUntypedServerMessage(buf)
+				processed = 1 // SSLandGSSENCAnswer
+			}
+			if needAnswers[msgType] {
+				delete(needAnswers, msgType)
 			}
 			if processed < 1 {
 				break
@@ -94,6 +95,15 @@ func waitServerMessage(conn net.Conn, readTimeout time.Duration, clientMsgType m
 			buf = buf[processed:]
 		}
 	}
+}
+
+func serverMessageType(firstByte byte, clientMsgType message_types.ClientMessageType) message_types.ServerMessageType {
+	if clientMsgType.IsCipherType() {
+		if message_types.IsSSLandGSSENCAnswer(firstByte) {
+			return message_types.SSLandGSSENCAnswer
+		}
+	}
+	return message_types.ServerMessageType(firstByte)
 }
 
 // processTypedServerMessage парсит серверное сообщение с ведущим байтом типа и
@@ -114,23 +124,10 @@ func processTypedServerMessage(data []byte) (processedData int, err error) {
 	return 1 + msgLen, nil
 }
 
-// processUntypedServerMessage парсит серверное сообщение без ведущего байта типа
-// (только длина в первых 4 байтах) и возвращает размер полного сообщения или 0,
-// если данных недостаточно.
-func processUntypedServerMessage(data []byte) (processedData int, err error) {
-	msgLen := int(binary.BigEndian.Uint32(data[0:4]))
-	if msgLen <= 0 {
-		return 0, fmt.Errorf("invalid length-only server message length")
-	}
-	if len(data) < msgLen {
-		return 0, nil
-	}
-	return msgLen, nil
-}
-
 // ReplayMessages сортирует сообщения по времени и воспроизводит их через TCP.
 // После отправки некоторых клиентских сообщений функция ждёт серверное ReadyForQuery.
-func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replayStartTime time.Time, startedMessageTime time.Time) error {
+func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replayStartTime time.Time,
+	startedMessageTime time.Time, streamNumber int) error {
 	if len(messages) == 0 {
 		return fmt.Errorf("no messages to replay")
 	}
@@ -146,19 +143,19 @@ func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replaySt
 
 	conn, err := connectTCP(config.TargetHost, config.TargetPort)
 	if err != nil {
-		return fmt.Errorf("failed to connect to target %s:%d: %v", config.TargetHost, config.TargetPort, err)
+		return fmt.Errorf("(%d) failed to connect to target %s:%d: %v", streamNumber, config.TargetHost, config.TargetPort, err)
 	}
 	defer conn.Close()
 
 	_, writeErr := conn.Write(firstMessage.Row())
 	if writeErr != nil {
-		return fmt.Errorf("message %d ERROR - write failed: %v", 1, writeErr)
+		return fmt.Errorf("(%d) message %d ERROR - write failed: %v", streamNumber, 1, writeErr)
 	}
-	if err = waitServerMessage(conn, config.ReadTimeout, message_types.StartMessage); err != nil {
+	if err = waitServerMessage(conn, config.ReadTimeout, firstMessage.Type); err != nil {
 		_ = conn.Close()
-		return fmt.Errorf("message %d ERROR - waiting server message failed: %v", 1, err)
+		return fmt.Errorf("(%d) message %d ERROR - waiting server message failed: %v", streamNumber, 1, err)
 	}
-	fmt.Printf("Message %d/%d SUCCESS - %d bytes, Type: %s\n", 1, len(messages), len(firstMessage.Row()), firstMessage.Type.String())
+	fmt.Printf("(%d) Message %d/%d SUCCESS - %d bytes, Type: %s\n", streamNumber, 1, len(messages), len(firstMessage.Row()), firstMessage.Type.String())
 
 	for i := 1; i < len(messages)-1; i++ {
 		m := messages[i]
@@ -171,14 +168,14 @@ func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replaySt
 		_, writeErr = conn.Write(m.Row())
 
 		if writeErr != nil {
-			return fmt.Errorf("message %d ERROR - write failed: %v", i+1, writeErr)
+			return fmt.Errorf("(%d) message %d ERROR - write failed: %v", streamNumber, i+1, writeErr)
 		}
 		if err = waitServerMessage(conn, config.ReadTimeout, m.Type); err != nil {
 			_ = conn.Close()
-			return fmt.Errorf("message %d ERROR - waiting server message failed: %v", i+1, err)
+			return fmt.Errorf("(%d) message %d ERROR - waiting server message failed: %v", streamNumber, i+1, err)
 		}
 
-		msg := fmt.Sprintf("Message %d/%d SUCCESS - %d bytes, Type: %s", i+1, len(messages), len(m.Row()), m.Type.String())
+		msg := fmt.Sprintf("(%d) Message %d/%d SUCCESS - %d bytes, Type: %s", streamNumber, i+1, len(messages), len(m.Row()), m.Type.String())
 		if config.PrintQuery && m.Type.IsSimpleQuery() {
 			msg += fmt.Sprintf(
 				", QUERY: %s", m.PrettyQuery(),
@@ -195,12 +192,12 @@ func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replaySt
 	}
 	_, writeErr = conn.Write(lastMessage.Row())
 	if writeErr != nil {
-		return fmt.Errorf("message %d ERROR - write failed: %v", len(messages)-1, writeErr)
+		return fmt.Errorf("(%d) message %d ERROR - write failed: %v", streamNumber, len(messages)-1, writeErr)
 	}
-	fmt.Printf("Message %d/%d SUCCESS - %d bytes, Type: %s\n", len(messages), len(messages), len(lastMessage.Row()), lastMessage.Type.String())
+	fmt.Printf("(%d) Message %d/%d SUCCESS - %d bytes, Type: %s\n", streamNumber, len(messages), len(messages), len(lastMessage.Row()), lastMessage.Type.String())
 
 	total := time.Since(replayStartTime)
-	_, err = fmt.Fprintf(os.Stdout, "Replay completed: %d messages, total time: %v\n",
+	_, err = fmt.Fprintf(os.Stdout, "(%d) Replay completed: %d messages, total time: %v\n", streamNumber,
 		len(messages), total)
 	if err != nil {
 		return err
