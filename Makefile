@@ -1,4 +1,4 @@
-.PHONY: all build build_bsd
+.PHONY: all build build_bsd test
 
 all: build build_bsd
 
@@ -10,4 +10,4 @@ build_bsd:
 		go build -v -o ./out/bsd/smd
 
 test:
-	go test -count=1 ./...
+	go test -count=1 ./test/...
