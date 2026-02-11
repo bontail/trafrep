@@ -79,7 +79,10 @@ var PrintCmd = &cobra.Command{
 		}
 		defer handle.Close()
 
-		filterIP := net.ParseIP(PcapPostgresHost)
+		var filterIP net.IP = nil
+		if PcapPostgresHost != "" {
+			filterIP = net.ParseIP(PcapPostgresHost)
+		}
 		packets := pcappkg.ExtractPackets(handle, filterIP, PcapPostgresPort)
 		log.Printf("Extracted %d tcp packets", len(packets))
 
@@ -125,7 +128,7 @@ var PrintCmd = &cobra.Command{
 			if m.Type.IsSimpleQuery() {
 				query = m.PrettyQuery()
 			}
-			fmt.Printf("%3d | %s | %s | %s\n",
+			log.Printf("%3d | %s | %s | %s\n",
 				i+1,
 				m.FirstTCPPacketTimestamp.Format("2006-01-02 15:04:05.000000"),
 				typ,

@@ -26,10 +26,6 @@ type TCPPacket struct {
 // Функция возвращает только те пакеты, у которых src или dst совпадает с filterIP и
 // соответствующий порт равен filterPort.
 func ExtractPackets(handle *pcap.Handle, filterIP net.IP, filterPort uint16) []TCPPacket {
-	if filterIP == nil {
-		return nil
-	}
-
 	var packets []TCPPacket
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 
@@ -40,8 +36,8 @@ func ExtractPackets(handle *pcap.Handle, filterIP net.IP, filterPort uint16) []T
 		}
 
 		ipSrc, ipDst := getIPs(packet.NetworkLayer())
-		if !((uint16(tcp.SrcPort) == filterPort && ipSrc.Equal(filterIP)) ||
-			(uint16(tcp.DstPort) == filterPort && ipDst.Equal(filterIP))) {
+		if !((uint16(tcp.SrcPort) == filterPort && (ipSrc.Equal(filterIP) || filterIP == nil)) ||
+			(uint16(tcp.DstPort) == filterPort && (ipDst.Equal(filterIP) || filterIP == nil))) {
 			continue
 		}
 

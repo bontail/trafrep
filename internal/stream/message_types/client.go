@@ -57,8 +57,7 @@ var clientMessageTypeNames = map[ClientMessageType]string{
 
 var waitedMessages = map[ClientMessageType]map[ServerMessageType]bool{
 	Query: {
-		CommandComplete: true,
-		ReadyForQuery:   true,
+		ReadyForQuery: true,
 	},
 	StartupMessage: {
 		ReadyForQuery: true,
@@ -67,8 +66,7 @@ var waitedMessages = map[ClientMessageType]map[ServerMessageType]bool{
 		ReadyForQuery: true,
 	},
 	Execute: {
-		CommandComplete: true,
-		ReadyForQuery:   true,
+		ReadyForQuery: true,
 	},
 	SSLRequest: {
 		SSLandGSSENCAnswer: true,

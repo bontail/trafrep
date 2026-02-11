@@ -26,8 +26,8 @@ func init() {
 		return
 	}
 
-	RootCmd.PersistentFlags().StringVarP(&PcapPostgresHost, "host", "H", "::1", "PostgreSQL хост в pcap файле")
-	RootCmd.PersistentFlags().Uint16VarP(&PcapPostgresPort, "port", "P", 5432, "PostgreSQL port в pcap файле")
+	RootCmd.PersistentFlags().StringVar(&PcapPostgresHost, "host", "", "PostgreSQL хост в pcap файле")
+	RootCmd.PersistentFlags().Uint16Var(&PcapPostgresPort, "port", 5432, "PostgreSQL port в pcap файле")
 }
 
 // GetPcapHandle открывает pcap файл по пути из флагов и возвращает *pcap.Handle.

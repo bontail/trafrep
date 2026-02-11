@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"net"
-	"os"
 	"time"
 
 	"trafRep/internal/stream"
@@ -28,8 +28,7 @@ func connectTCP(targetHost string, targetPort int) (net.Conn, error) {
 	return net.Dial("tcp", addr)
 }
 
-// waitServerMessage читает данные из conn до тех пор, пока не будут получены
-// требуемые серверные ответы.
+// waitServerMessage читает данные из conn до тех пор, пока не будут получены требуемые серверные ответы.
 // readTimeout задаёт общий таймаут ожидания.
 func waitServerMessage(conn net.Conn, readTimeout time.Duration, clientMsgType message_types.ClientMessageType) error {
 	if conn == nil {
@@ -51,7 +50,7 @@ func waitServerMessage(conn net.Conn, readTimeout time.Duration, clientMsgType m
 		}
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting server message after client message")
+			return fmt.Errorf("timeout waiting server message after client message (%v)", needAnswers)
 		}
 
 		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
@@ -62,10 +61,10 @@ func waitServerMessage(conn net.Conn, readTimeout time.Duration, clientMsgType m
 		if err != nil {
 			var ne net.Error
 			if errors.As(err, &ne) && ne.Timeout() {
-				return fmt.Errorf("timeout waiting server message after client message")
+				return fmt.Errorf("timeout waiting server message after client message (%v)", needAnswers)
 			}
 			if err == io.EOF {
-				return fmt.Errorf("connection closed by remote")
+				return fmt.Errorf("connection closed by remote (%v)", needAnswers)
 			}
 			return fmt.Errorf("read error while waiting server message: %w", err)
 		}
@@ -124,8 +123,71 @@ func processTypedServerMessage(data []byte) (processedData int, err error) {
 	return 1 + msgLen, nil
 }
 
-// ReplayMessages сортирует сообщения по времени и воспроизводит их через TCP.
-// После отправки некоторых клиентских сообщений функция ждёт серверное ReadyForQuery.
+// computeInitialWaitTarget возвращает момент времени, в который нужно начинать
+// воспроизведение первого сообщения (в составе replayStartTime плюс смещение),
+// с учётом небольшой корректировки -100µs.
+func computeInitialWaitTarget(replayStartTime time.Time, firstMessage stream.PostgreSQLMessage, startedMessageTime time.Time) time.Time {
+	waitTarget := replayStartTime.Add(firstMessage.TimeUntilSendFirstPacket(startedMessageTime))
+	return waitTarget.Add(-100 * time.Microsecond)
+}
+
+// waitUntil засыпает пока не придёт target (если target в будущем).
+func waitUntil(target time.Time) {
+	if wait := time.Until(target); wait > 0 {
+		time.Sleep(wait)
+	}
+}
+
+// waitAndConnect ждёт до waitTarget и затем устанавливает TCP‑соединение.
+func waitAndConnect(config Config, waitTarget time.Time) (net.Conn, error) {
+	waitUntil(waitTarget)
+	return connectTCP(config.TargetHost, config.TargetPort)
+}
+
+// writeMessage выполняет запись байт сообщения в соединение и возвращает ошибку при неудаче.
+func writeMessage(conn net.Conn, data []byte) error {
+	_, err := conn.Write(data)
+	return err
+}
+
+// sendAndMaybeWait отправляет сообщение m, при необходимости ждёт серверный ответ,
+// логирует результат и возвращает ошибку при неудаче.
+func sendAndMaybeWait(conn net.Conn, m stream.PostgreSQLMessage, config Config, streamNumber int, index int, total int) error {
+	if err := writeMessage(conn, m.Row()); err != nil {
+		return fmt.Errorf("(%d) message %d ERROR - write failed: %v", streamNumber, index, err)
+	}
+
+	if err := waitServerMessage(conn, config.ReadTimeout, m.Type); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("(%d) message %d/%d (%s) ERROR - waiting server message failed: %v", streamNumber, index, total, m.PrettyQuery(), err)
+	}
+
+	msg := fmt.Sprintf("(%d) Message %d/%d SUCCESS - %d bytes, Type: %s", streamNumber, index, total, len(m.Row()), m.Type.String())
+	if config.PrintQuery && m.Type.IsSimpleQuery() {
+		msg += fmt.Sprintf(", QUERY: %s", m.PrettyQuery())
+	}
+	log.Println(msg)
+	return nil
+}
+
+// replayLoop выполняет основную отправку сообщений (кроме первого),
+// соблюдая таргетированные временные оффсеты с учётом config.Rate.
+func replayLoop(conn net.Conn, messages []stream.PostgreSQLMessage, config Config, replayStartTime time.Time, startedMessageTime time.Time, streamNumber int) error {
+	total := len(messages)
+	for i := 1; i < total; i++ {
+		m := messages[i]
+		targetOffset := time.Duration(float64(m.TimeUntilSendFirstPacket(startedMessageTime)) / config.Rate)
+		targetTime := replayStartTime.Add(targetOffset)
+		waitUntil(targetTime)
+
+		if err := sendAndMaybeWait(conn, m, config, streamNumber, i+1, total); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReplayMessages воспроизводит сообщения через TCP.
 func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replayStartTime time.Time,
 	startedMessageTime time.Time, streamNumber int) error {
 	if len(messages) == 0 {
@@ -133,74 +195,23 @@ func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replaySt
 	}
 	firstMessage := messages[0]
 
-	waitTarget := replayStartTime.Add(
-		firstMessage.FirstTCPPacketTimestamp.Sub(startedMessageTime),
-	)
-	waitTarget = waitTarget.Add(-100 * time.Microsecond) // небольшая задержка из-за учета установки соединения
-	if wait := time.Until(waitTarget); wait > 0 {
-		time.Sleep(wait)
-	}
-
-	conn, err := connectTCP(config.TargetHost, config.TargetPort)
+	waitTarget := computeInitialWaitTarget(replayStartTime, firstMessage, startedMessageTime)
+	conn, err := waitAndConnect(config, waitTarget)
 	if err != nil {
 		return fmt.Errorf("(%d) failed to connect to target %s:%d: %v", streamNumber, config.TargetHost, config.TargetPort, err)
 	}
 	defer conn.Close()
 
-	_, writeErr := conn.Write(firstMessage.Row())
-	if writeErr != nil {
-		return fmt.Errorf("(%d) message %d ERROR - write failed: %v", streamNumber, 1, writeErr)
-	}
-	if err = waitServerMessage(conn, config.ReadTimeout, firstMessage.Type); err != nil {
-		_ = conn.Close()
-		return fmt.Errorf("(%d) message %d ERROR - waiting server message failed: %v", streamNumber, 1, err)
-	}
-	fmt.Printf("(%d) Message %d/%d SUCCESS - %d bytes, Type: %s\n", streamNumber, 1, len(messages), len(firstMessage.Row()), firstMessage.Type.String())
-
-	for i := 1; i < len(messages)-1; i++ {
-		m := messages[i]
-		targetOffset := time.Duration(float64(m.FirstTCPPacketTimestamp.Sub(startedMessageTime)) / config.Rate)
-		targetTime := replayStartTime.Add(targetOffset)
-		if wait := time.Until(targetTime); wait > 0 {
-			time.Sleep(wait)
-		}
-
-		_, writeErr = conn.Write(m.Row())
-
-		if writeErr != nil {
-			return fmt.Errorf("(%d) message %d ERROR - write failed: %v", streamNumber, i+1, writeErr)
-		}
-		if err = waitServerMessage(conn, config.ReadTimeout, m.Type); err != nil {
-			_ = conn.Close()
-			return fmt.Errorf("(%d) message %d ERROR - waiting server message failed: %v", streamNumber, i+1, err)
-		}
-
-		msg := fmt.Sprintf("(%d) Message %d/%d SUCCESS - %d bytes, Type: %s", streamNumber, i+1, len(messages), len(m.Row()), m.Type.String())
-		if config.PrintQuery && m.Type.IsSimpleQuery() {
-			msg += fmt.Sprintf(
-				", QUERY: %s", m.PrettyQuery(),
-			)
-		}
-		fmt.Println(msg)
-	}
-
-	lastMessage := messages[len(messages)-1]
-	targetOffset := time.Duration(float64(lastMessage.FirstTCPPacketTimestamp.Sub(startedMessageTime)) / config.Rate)
-	targetTime := replayStartTime.Add(targetOffset)
-	if wait := time.Until(targetTime); wait > 0 {
-		time.Sleep(wait)
-	}
-	_, writeErr = conn.Write(lastMessage.Row())
-	if writeErr != nil {
-		return fmt.Errorf("(%d) message %d ERROR - write failed: %v", streamNumber, len(messages)-1, writeErr)
-	}
-	fmt.Printf("(%d) Message %d/%d SUCCESS - %d bytes, Type: %s\n", streamNumber, len(messages), len(messages), len(lastMessage.Row()), lastMessage.Type.String())
-
-	total := time.Since(replayStartTime)
-	_, err = fmt.Fprintf(os.Stdout, "(%d) Replay completed: %d messages, total time: %v\n", streamNumber,
-		len(messages), total)
-	if err != nil {
+	if err := sendAndMaybeWait(conn, firstMessage, config, streamNumber, 1, len(messages)); err != nil {
 		return err
 	}
+
+	if err := replayLoop(conn, messages, config, replayStartTime, startedMessageTime, streamNumber); err != nil {
+		return err
+	}
+
+	totalDuration := time.Since(replayStartTime)
+	log.Printf("(%d) Replay completed: %d messages, total time: %v\n", streamNumber,
+		len(messages), totalDuration)
 	return nil
 }

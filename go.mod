@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/google/gopacket v1.1.19
 	github.com/jackc/pgx/v5 v5.7.6
+	github.com/lib/pq v1.11.1
 	github.com/spf13/cobra v1.10.1
 	github.com/testcontainers/testcontainers-go v0.40.0
 )

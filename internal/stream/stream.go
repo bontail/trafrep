@@ -22,6 +22,10 @@ type PostgreSQLMessage struct {
 	Payload                  []byte
 }
 
+func (m PostgreSQLMessage) TimeUntilSendFirstPacket(pcapTime time.Time) time.Duration {
+	return m.FirstTCPPacketTimestamp.Sub(pcapTime)
+}
+
 // PrettyQuery возвращает строку с SQL запросом для вывода.
 func (m PostgreSQLMessage) PrettyQuery() string {
 	return strings.TrimSpace(string(m.Payload[:len(m.Payload)-1]))
@@ -128,7 +132,7 @@ func (m *TCPStreamManager) GetStreamMessages() [][]PostgreSQLMessage {
 // срезе completed.
 // Данные от сервера накапливаются и сканируются на предмет сообщений типа CommandComplete и ReadyForQuery.
 func (m *TCPStreamManager) AddPacket(data []byte, timestamp time.Time, ipSrc, ipDst string, portSrc, portDst uint16, serverIp string, serverPort uint16) error {
-	isFromServer := ipSrc == serverIp && portSrc == serverPort
+	isFromServer := (ipSrc == serverIp || serverIp == "") && portSrc == serverPort
 
 	key := m.createKey(isFromServer, ipSrc, ipDst, portSrc, portDst)
 
@@ -327,19 +331,12 @@ func (s *TCPStream) parseServerBuffer() {
 		msgLastTs := s.clientSegs.timestampByOffset(processed - 1)
 		msgType := msgtypes.ServerMessageType(s.serverBuf[0])
 		if msgType.IsCommandComplete() {
-			s.assignCommandComplete(msgLastTs)
 		} else if msgType.IsReadyForQuery() {
 			s.assignReadyForQuery(msgLastTs)
 		}
 
 		s.clearServerProcessedBytes(processed)
 	}
-}
-
-// assignCommandComplete устанавливает CommandCompleteTimestamp для следующего ожидающего сообщения.
-func (s *TCPStream) assignCommandComplete(ts time.Time) {
-	s.completed[s.needCommandCompleteIndex].CommandCompleteTimestamp = ts
-	s.needCommandCompleteIndex++
 }
 
 // assignReadyForQuery устанавливает ReadyForQueryTimestamp для следующего ожидающего сообщения.

@@ -1,22 +1,29 @@
-package integration
+package integration_test
 
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"trafRep/test/integration"
 )
 
+const ContainerDumpPath = "/tmp/backup.sql"
+const HostDumpPathPrefix = "/tmp/trafrep/"
+
 type ReplayTestCase struct {
-	PcapFile        string
-	PreparedQueries []string
-	CheckFunc       func(ctx context.Context, conn *pgx.Conn) error
+	PcapFile     string
+	ExpectedDump string
 }
 
 func dockerAvailable() bool {
@@ -81,21 +88,65 @@ func RunReplay(t *testing.T, tc ReplayTestCase) {
 		t.Fatalf("db not ready: %v", err)
 	}
 
-	for _, q := range tc.PreparedQueries {
-		_, err := pgxConn.Exec(ctx, q)
-		if err != nil {
-			t.Fatalf("prepared query failed: %v\nQuery: %s", err, q)
-		}
-	}
-
-	pcapPath := filepath.Join("./../../../../testdata", tc.PcapFile)
-	cmd := exec.Command("go", "run", "./../../../../main.go", "replay", "--pcap", pcapPath, "--target-host", host, "--target-port", port.Port(), "--print-query")
+	pcapPath := filepath.Join("./../../testdata/pcaps", tc.PcapFile)
+	cmd := exec.Command("go", "run", "./../../main.go", "replay", "--pcap", pcapPath, "--target-host", host, "--target-port", port.Port(), "--print-query")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("replay failed: %v\nOutput: %s", err, string(output))
 	}
 
-	if err = tc.CheckFunc(ctx, pgxConn); err != nil {
-		t.Errorf("check failed %s for test case: %s", err, tc.PcapFile)
+	exitCode, _, stderr := container.Exec(ctx, []string{
+		"pg_dump",
+		"-U", "postgres",
+		"-d", "postgres",
+		"-f", ContainerDumpPath,
+		"--data-only",
+		"--inserts",
+		"--column-inserts",
+		"--no-owner",
+		"--no-privileges",
+		"--no-comments",
+		"--disable-triggers",
+		"--no-publications",
+		"--no-subscriptions",
+	})
+	if exitCode != 0 {
+		t.Fatalf("pg_dump exit=%d stderr=%s", exitCode, stderr)
+	}
+
+	if err = integration.CopyDumpFromContainer(ctx, container, ContainerDumpPath, HostDumpPathPrefix+container.GetContainerID()); err != nil {
+		log.Fatalf("copy dump failed: %v", err)
+	}
+
+	if err = integration.RemoveRestrictLines(HostDumpPathPrefix + container.GetContainerID()); err != nil {
+		log.Fatalf("remove restrict lines failed: %v", err)
+	}
+
+	expectedPath := filepath.Join("./../../testdata/dumps", tc.ExpectedDump)
+
+	cmd = exec.Command("diff", "-u", expectedPath, HostDumpPathPrefix+container.GetContainerID())
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("diff failed: %v\nOutput: %s", err, string(output))
+	}
+}
+
+func TestReplay(t *testing.T) {
+	entries, err := os.ReadDir("./../../testdata/pcaps")
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		testName := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+		t.Run(testName, func(t *testing.T) {
+			tc := ReplayTestCase{
+				PcapFile:     testName + ".pcap",
+				ExpectedDump: testName + ".sql",
+			}
+			RunReplay(t, tc)
+		})
 	}
 }

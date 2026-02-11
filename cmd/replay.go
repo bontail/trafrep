@@ -35,7 +35,10 @@ var ReplayCmd = &cobra.Command{
 		}
 		defer handle.Close()
 
-		filterIP := net.ParseIP(PcapPostgresHost)
+		var filterIP net.IP = nil
+		if PcapPostgresHost != "" {
+			filterIP = net.ParseIP(PcapPostgresHost)
+		}
 		packets := pcappkg.ExtractPackets(
 			handle,
 			filterIP,
