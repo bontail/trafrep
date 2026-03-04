@@ -14,6 +14,7 @@ import (
 	"trafRep/internal/stream/message_types"
 )
 
+// Config содержит параметры воспроизведения: адрес целевого сервера, коэффициент скорости и таймаут ожидания ответов.
 type Config struct {
 	TargetHost  string
 	TargetPort  int
@@ -22,13 +23,49 @@ type Config struct {
 	ReadTimeout time.Duration
 }
 
+// PacketGroup объединяет PostgreSQL-сообщения, отправленные в одном TCP-пакете.
+// Все они отправляются одним вызовом Write; ответ ожидается по типу последнего
+// сообщения в группе, которое требует серверного ответа.
+type PacketGroup struct {
+	messages []stream.PostgreSQLMessage
+	data     []byte
+	waitType message_types.ClientMessageType
+}
+
+// GroupByPacket группирует последовательные сообщения, которые начинаются в
+// одном TCP-пакете (определяется по совпадению FirstTCPPacketTimestamp).
+func GroupByPacket(messages []stream.PostgreSQLMessage) []PacketGroup {
+	var groups []PacketGroup
+	i := 0
+	for i < len(messages) {
+		ts := messages[i].FirstTCPPacketTimestamp
+		var groupMsgs []stream.PostgreSQLMessage
+		var data []byte
+		var waitType message_types.ClientMessageType
+		for i < len(messages) && messages[i].FirstTCPPacketTimestamp.Equal(ts) {
+			data = append(data, messages[i].Row()...)
+			if len(messages[i].Type.NeedAnswers()) > 0 {
+				waitType = messages[i].Type
+			}
+			groupMsgs = append(groupMsgs, messages[i])
+			i++
+		}
+		groups = append(groups, PacketGroup{
+			messages: groupMsgs,
+			data:     data,
+			waitType: waitType,
+		})
+	}
+	return groups
+}
+
 // connectTCP устанавливает TCP‑соединение с указанным адресом и возвращает net.Conn.
 func connectTCP(targetHost string, targetPort int) (net.Conn, error) {
 	addr := fmt.Sprintf("%s:%d", targetHost, targetPort)
 	return net.Dial("tcp", addr)
 }
 
-// waitServerMessage читает данные из conn до тех пор, пока не будут получены требуемые серверные ответы.
+// waitServerMessage читает данные из conn до тех пор, пока не будет получен требуемый серверный ответ.
 // readTimeout задаёт общий таймаут ожидания.
 func waitServerMessage(conn net.Conn, readTimeout time.Duration, clientMsgType message_types.ClientMessageType) error {
 	if conn == nil {
@@ -45,10 +82,6 @@ func waitServerMessage(conn net.Conn, readTimeout time.Duration, clientMsgType m
 	tmp := make([]byte, 4096)
 
 	for {
-		if len(needAnswers) < 1 {
-			return nil
-		}
-
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timeout waiting server message after client message (%v)", needAnswers)
 		}
@@ -85,17 +118,19 @@ func waitServerMessage(conn net.Conn, readTimeout time.Duration, clientMsgType m
 			} else {
 				processed = 1 // SSLandGSSENCAnswer
 			}
-			if needAnswers[msgType] {
-				delete(needAnswers, msgType)
-			}
 			if processed < 1 {
 				break
+			}
+			if needAnswers[msgType] {
+				return nil
 			}
 			buf = buf[processed:]
 		}
 	}
 }
 
+// serverMessageType определяет тип серверного сообщения по первому байту.
+// Если ожидается SSL/GSSENC-ответ, возвращает SSLandGSSENCAnswer для соответствующих байтов.
 func serverMessageType(firstByte byte, clientMsgType message_types.ClientMessageType) message_types.ServerMessageType {
 	if clientMsgType.IsCipherType() {
 		if message_types.IsSSLandGSSENCAnswer(firstByte) {
@@ -107,14 +142,13 @@ func serverMessageType(firstByte byte, clientMsgType message_types.ClientMessage
 
 // processTypedServerMessage парсит серверное сообщение с ведущим байтом типа и
 // возвращает количество байт полного сообщения (1 + len) или 0 если данных недостаточно.
-// Проверяет корректность длины.
 func processTypedServerMessage(data []byte) (processedData int, err error) {
 	if len(data) < 5 {
 		return 0, nil
 	}
 	msgLen := int(binary.BigEndian.Uint32(data[1:5]))
-	if msgLen <= 0 {
-		return 0, fmt.Errorf("invalid typed server message length")
+	if msgLen < 4 {
+		return 0, fmt.Errorf("invalid typed server message length: %d", msgLen)
 	}
 
 	if len(data) < 1+msgLen {
@@ -144,74 +178,77 @@ func waitAndConnect(config Config, waitTarget time.Time) (net.Conn, error) {
 	return connectTCP(config.TargetHost, config.TargetPort)
 }
 
-// writeMessage выполняет запись байт сообщения в соединение и возвращает ошибку при неудаче.
-func writeMessage(conn net.Conn, data []byte) error {
-	_, err := conn.Write(data)
-	return err
-}
-
-// sendAndMaybeWait отправляет сообщение m, при необходимости ждёт серверный ответ,
-// логирует результат и возвращает ошибку при неудаче.
-func sendAndMaybeWait(conn net.Conn, m stream.PostgreSQLMessage, config Config, streamNumber int, index int, total int) error {
-	if err := writeMessage(conn, m.Row()); err != nil {
-		return fmt.Errorf("(%d) message %d ERROR - write failed: %v", streamNumber, index, err)
+// sendGroup отправляет все сообщения группы одним Write и ждёт ответа сервера.
+func sendGroup(conn net.Conn, group PacketGroup, config Config, streamNumber int, index int, total int) error {
+	if _, err := conn.Write(group.data); err != nil {
+		return fmt.Errorf("(%d) group %d/%d ERROR - write failed: %v", streamNumber, index, total, err)
 	}
 
-	if err := waitServerMessage(conn, config.ReadTimeout, m.Type); err != nil {
+	if err := waitServerMessage(conn, config.ReadTimeout, group.waitType); err != nil {
 		_ = conn.Close()
-		return fmt.Errorf("(%d) message %d/%d (%s) ERROR - waiting server message failed: %v", streamNumber, index, total, m.PrettyQuery(), err)
+		return fmt.Errorf("(%d) group %d/%d ERROR - waiting server message failed: %v", streamNumber, index, total, err)
 	}
 
-	msg := fmt.Sprintf("(%d) Message %d/%d SUCCESS - %d bytes, Type: %s", streamNumber, index, total, len(m.Row()), m.Type.String())
-	if config.PrintQuery && m.Type.IsSimpleQuery() {
-		msg += fmt.Sprintf(", QUERY: %s", m.PrettyQuery())
+	msg := fmt.Sprintf("(%d) Group %d/%d SUCCESS", streamNumber, index, total)
+	if config.PrintQuery {
+		for _, m := range group.messages {
+			msg += fmt.Sprintf(" Type: %s,", m.Type)
+			if m.Type.IsSimpleQuery() {
+				msg += fmt.Sprintf(" QUERY: %s", m.PrettyQuery())
+			}
+		}
 	}
-	log.Println(msg)
+	log.Printf(msg)
 	return nil
 }
 
-// replayLoop выполняет основную отправку сообщений (кроме первого),
-// соблюдая таргетированные временные оффсеты с учётом config.Rate.
-func replayLoop(conn net.Conn, messages []stream.PostgreSQLMessage, config Config, replayStartTime time.Time, startedMessageTime time.Time, streamNumber int) error {
-	total := len(messages)
+// replayGroupLoop отправляет группы пакетов начиная со второй,
+// соблюдая временны́е оффсеты с учётом config.Rate.
+func replayGroupLoop(conn net.Conn, groups []PacketGroup, config Config, replayStartTime time.Time, startedMessageTime time.Time, streamNumber int) error {
+	total := len(groups)
 	for i := 1; i < total; i++ {
-		m := messages[i]
-		targetOffset := time.Duration(float64(m.TimeUntilSendFirstPacket(startedMessageTime)) / config.Rate)
+		group := groups[i]
+		targetOffset := time.Duration(float64(group.messages[0].TimeUntilSendFirstPacket(startedMessageTime)) / config.Rate)
 		targetTime := replayStartTime.Add(targetOffset)
 		waitUntil(targetTime)
 
-		if err := sendAndMaybeWait(conn, m, config, streamNumber, i+1, total); err != nil {
+		if err := sendGroup(conn, group, config, streamNumber, i+1, total); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// ReplayMessages воспроизводит сообщения через TCP.
-func ReplayMessages(messages []stream.PostgreSQLMessage, config Config, replayStartTime time.Time,
+// ReplayMessages воспроизводит предварительно сгруппированные сообщения через TCP.
+// Каждая группа отправляется одним Write; ответ сервера ожидается по типу последнего
+// сообщения в группе, требующего ответа.
+func ReplayMessages(groups []PacketGroup, config Config, replayStartTime time.Time,
 	startedMessageTime time.Time, streamNumber int) error {
-	if len(messages) == 0 {
-		return fmt.Errorf("no messages to replay")
+	if len(groups) == 0 {
+		return fmt.Errorf("no groups to replay")
 	}
-	firstMessage := messages[0]
 
-	waitTarget := computeInitialWaitTarget(replayStartTime, firstMessage, startedMessageTime)
+	waitTarget := computeInitialWaitTarget(replayStartTime, groups[0].messages[0], startedMessageTime)
 	conn, err := waitAndConnect(config, waitTarget)
 	if err != nil {
 		return fmt.Errorf("(%d) failed to connect to target %s:%d: %v", streamNumber, config.TargetHost, config.TargetPort, err)
 	}
 	defer conn.Close()
 
-	if err := sendAndMaybeWait(conn, firstMessage, config, streamNumber, 1, len(messages)); err != nil {
+	if err := sendGroup(conn, groups[0], config, streamNumber, 1, len(groups)); err != nil {
 		return err
 	}
 
-	if err := replayLoop(conn, messages, config, replayStartTime, startedMessageTime, streamNumber); err != nil {
+	if err := replayGroupLoop(conn, groups, config, replayStartTime, startedMessageTime, streamNumber); err != nil {
 		return err
 	}
 
 	totalDuration := time.Since(replayStartTime)
-	log.Printf("(%d) Replay completed: %d messages, total time: %v\n", streamNumber,
-		len(messages), totalDuration)
+	totalMessages := 0
+	for _, g := range groups {
+		totalMessages += len(g.messages)
+	}
+	log.Printf("(%d) Replay completed: %d groups (%d messages), total time: %v", streamNumber,
+		len(groups), totalMessages, totalDuration)
 	return nil
 }

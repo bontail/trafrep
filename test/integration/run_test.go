@@ -46,7 +46,7 @@ func RunReplay(t *testing.T, tc ReplayTestCase) {
 
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        "postgres:15-alpine",
+			Image:        "postgres:15.15-alpine",
 			ExposedPorts: []string{"5432/tcp"},
 			Env: map[string]string{
 				"POSTGRES_HOST_AUTH_METHOD": "trust",

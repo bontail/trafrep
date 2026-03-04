@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/testcontainers/testcontainers-go"
@@ -46,6 +47,9 @@ func CopyDumpFromContainer(
 	}
 	defer reader.Close()
 
+	if err := os.MkdirAll(filepath.Dir(hostPath), 0755); err != nil {
+		return err
+	}
 	out, err := os.Create(hostPath)
 	if err != nil {
 		return err

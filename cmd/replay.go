@@ -14,6 +14,7 @@ import (
 	pcappkg "trafRep/internal/pcap"
 	"trafRep/internal/replay"
 	"trafRep/internal/stream"
+	msgtypes "trafRep/internal/stream/message_types"
 )
 
 var (
@@ -38,6 +39,9 @@ var ReplayCmd = &cobra.Command{
 		var filterIP net.IP = nil
 		if PcapPostgresHost != "" {
 			filterIP = net.ParseIP(PcapPostgresHost)
+			if filterIP == nil {
+				return fmt.Errorf("invalid IP address for filter: %s", PcapPostgresHost)
+			}
 		}
 		packets := pcappkg.ExtractPackets(
 			handle,
@@ -53,7 +57,7 @@ var ReplayCmd = &cobra.Command{
 
 		manager := stream.NewTCPStreamManager()
 
-		for _, pkt := range packets {
+		for i, pkt := range packets {
 
 			if err := manager.AddPacket(
 				pkt.Data,
@@ -65,14 +69,22 @@ var ReplayCmd = &cobra.Command{
 				PcapPostgresHost,
 				PcapPostgresPort,
 			); err != nil {
-				log.Printf("AddPacket error: %v", err)
+				log.Printf("AddPacket error (packet %d, ts %s): %v", i+1, pkt.Timestamp.Format("15:04:05.000000"), err)
 			}
 		}
 
-		streams := manager.GetStreamMessages()
+		allStreams := manager.GetStreamMessages()
+		var streams [][]stream.PostgreSQLMessage
+		for _, s := range allStreams {
+			if len(s) > 0 && s[0].Type == msgtypes.CancelRequest {
+				log.Printf("Skipping CancelRequest stream (%d messages)", len(s))
+				continue
+			}
+			streams = append(streams, s)
+		}
 
 		if len(streams) == 0 {
-			log.Printf("no messages extracted, nothing to replay")
+			log.Printf("No messages extracted, nothing to replay")
 			return nil
 		}
 
@@ -91,12 +103,18 @@ var ReplayCmd = &cobra.Command{
 			}
 		}
 
+		groupsList := make([][]replay.PacketGroup, len(streams))
+		for i, s := range streams {
+			groupsList[i] = replay.GroupByPacket(s)
+			log.Printf("Stream %d: %d messages, %d groups", i, len(s), len(groupsList[i]))
+		}
+
 		replayStart := time.Now()
 		var wg sync.WaitGroup
-		for i, stream := range streams {
+		for i, groups := range groupsList {
 			wg.Go(func() {
-				if err := replay.ReplayMessages(stream, cfg, replayStart, startedMessageTime, i); err != nil {
-					log.Printf("replay stream error: %v", err)
+				if err := replay.ReplayMessages(groups, cfg, replayStart, startedMessageTime, i); err != nil {
+					log.Printf("Replay error: %v", err)
 				}
 			})
 		}
@@ -111,4 +129,5 @@ func init() {
 	ReplayCmd.Flags().Float64Var(&replayRate, "rate", 1.0, "Скорость реплея (1.0 = оригинал)")
 	ReplayCmd.Flags().BoolVar(&replayPrintQuery, "print-query", false, "Печатать текст запроса при успешной отправке (если доступен)")
 	ReplayCmd.Flags().IntVar(&replayReadTimeoutSeconds, "ready-timeout", 25, "Таймаут ожидания ответа сервера в секундах")
+	ReplayCmd.MarkPersistentFlagRequired("pcap")
 }

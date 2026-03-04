@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"trafRep/test/integration"
@@ -17,7 +18,7 @@ import (
 )
 
 const (
-	name              = "distinct_and_order_by"
+	name              = "multithread"
 	containerDumpPath = "/tmp/backup.sql"
 	hostDumpPath      = "./testdata/dumps/" + name + ".sql"
 
@@ -26,18 +27,48 @@ const (
 )
 
 func runSQL(db *sql.DB) {
-	db.Exec("CREATE TABLE events (id SERIAL PRIMARY KEY, event_type VARCHAR(50), created_at TIMESTAMP)")
-	db.Exec("INSERT INTO events (event_type, created_at) VALUES ('login', '2024-01-01 09:00:00.000000'), ('logout', '2024-01-01 09:30:00.000000'), ('login', '2024-01-01 10:00:00.000000'), ('error', '2024-01-01 10:15:00.000000')")
+	db.Exec("CREATE TABLE threads (id int)")
 
-	rows, _ := db.Query("SELECT DISTINCT event_type FROM events ORDER BY event_type")
-	defer rows.Close()
-	for rows.Next() {
-	}
+	ctx := context.Background()
+	var wg sync.WaitGroup
 
-	rows2, _ := db.Query("SELECT event_type, COUNT(*) FROM events GROUP BY event_type ORDER BY COUNT(*) DESC")
-	defer rows2.Close()
-	for rows2.Next() {
+	for i := 1; i <= 5; i++ {
+		time.Sleep(200 * time.Millisecond)
+
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			log.Fatalf("db.Conn failed for goroutine %d: %v", i, err)
+		}
+
+		wg.Go(func() {
+			defer conn.Close()
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			counter := 0
+			for {
+				select {
+				case <-ticker.C:
+					counter++
+
+					_, err := conn.ExecContext(ctx, "INSERT INTO threads (id) VALUES ($1)", i*counter)
+					if err != nil {
+						log.Printf("Горутина %d ошибка вставки: %v\n", i, err)
+						continue
+					}
+
+					fmt.Printf("Горутина %d вставила запись #%d в %v\n",
+						i, counter, time.Now().Format("15:04:05.000"))
+
+					if counter > 10 {
+						fmt.Printf("Горутина %d завершила работу после %d вставок\n", i, counter)
+						return
+					}
+				}
+			}
+		})
 	}
+	wg.Wait()
+	time.Sleep(4 * time.Second)
 }
 
 func main() {
@@ -91,7 +122,7 @@ func startPostgresContainer(ctx context.Context) (testcontainers.Container, DBCo
 		ctx,
 		testcontainers.GenericContainerRequest{
 			ContainerRequest: testcontainers.ContainerRequest{
-				Image:        "postgres:15-alpine",
+				Image:        "postgres:15.15-alpine",
 				ExposedPorts: []string{"5432/tcp"},
 				Env: map[string]string{
 					"POSTGRES_USER":             "postgres",
@@ -187,8 +218,8 @@ func connectDB(cfg DBConfig) *sql.DB {
 		log.Fatalf("sql.Open failed: %v", err)
 	}
 
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	db.SetMaxOpenConns(5)
+	db.SetMaxIdleConns(5)
 
 	if err := db.Ping(); err != nil {
 		log.Fatalf("db ping failed: %v", err)

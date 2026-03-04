@@ -13,11 +13,15 @@ import (
 	"trafRep/internal/stream"
 )
 
+// FilterSide задаёт сторону соединения, сообщения которой выводит команда print.
 type FilterSide int
 
 const (
+	// FilterBoth выводит сообщения обоих направлений.
 	FilterBoth FilterSide = iota
+	// FilterClients выводит только клиентские сообщения.
 	FilterClients
+	// FilterServer выводит только серверные сообщения.
 	FilterServer
 )
 
@@ -33,6 +37,7 @@ var filterSideValues = map[string]FilterSide{
 	"server":  FilterServer,
 }
 
+// String возвращает строковое представление FilterSide (реализует fmt.Stringer).
 func (fs FilterSide) String() string {
 	if s, ok := filterSideNames[fs]; ok {
 		return s
@@ -61,6 +66,7 @@ func (fs *FilterSide) Set(s string) error {
 	return fmt.Errorf("invalid filter value: %q (allowed: %s)", s, strings.Join(keys, "|"))
 }
 
+// Type возвращает имя типа флага для cobra/pflag (реализует pflag.Value).
 func (fs FilterSide) Type() string {
 	return "filterSide"
 }
@@ -92,7 +98,7 @@ var PrintCmd = &cobra.Command{
 
 		manager := stream.NewTCPStreamManager()
 
-		for _, pkt := range packets {
+		for i, pkt := range packets {
 			switch printFilterSide {
 			case FilterBoth:
 			case FilterClients:
@@ -108,7 +114,7 @@ var PrintCmd = &cobra.Command{
 			if err := manager.AddPacket(
 				pkt.Data, pkt.Timestamp, pkt.IPSource, pkt.IPDest, pkt.PortSource, pkt.PortDest, PcapPostgresHost, PcapPostgresPort,
 			); err != nil {
-				log.Printf("AddPacket error: %v", err)
+				log.Printf("AddPacket error (packet %d, ts %s): %v", i+1, pkt.Timestamp.Format("15:04:05.000000"), err)
 			}
 		}
 
@@ -128,7 +134,7 @@ var PrintCmd = &cobra.Command{
 			if m.Type.IsSimpleQuery() {
 				query = m.PrettyQuery()
 			}
-			log.Printf("%3d | %s | %s | %s\n",
+			fmt.Printf("%3d | %s | %s | %s\n",
 				i+1,
 				m.FirstTCPPacketTimestamp.Format("2006-01-02 15:04:05.000000"),
 				typ,
@@ -141,4 +147,5 @@ var PrintCmd = &cobra.Command{
 
 func init() {
 	PrintCmd.Flags().Var(&printFilterSide, "filter", "Фильтр вывода: clients | server | both")
+	PrintCmd.MarkPersistentFlagRequired("pcap")
 }

@@ -10,4 +10,4 @@ build_bsd:
 		go build -v -o ./out/bsd/smd
 
 test:
-	go test -count=1 ./test/...
+	go test -count=1 ./test/... -v
