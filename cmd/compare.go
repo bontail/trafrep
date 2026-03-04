@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/gopacket/pcap"
@@ -14,6 +15,7 @@ import (
 
 	pcappkg "trafRep/internal/pcap"
 	"trafRep/internal/stream"
+	htmlpkg "trafRep/internal/html"
 	svgpkg "trafRep/internal/svg"
 )
 
@@ -23,15 +25,20 @@ var (
 	compareHost         string
 	comparePort         uint16
 	compareOutput       string
+	compareFormat       string
 	compareDeltaShow    string
 	compareDeltaColor   string
 )
 
-// CompareCmd генерирует SVG с визуализацией двух pcap-таймлайнов.
+// CompareCmd генерирует визуализацию двух pcap-таймлайнов (HTML или SVG).
 var CompareCmd = &cobra.Command{
 	Use:   "compare",
-	Short: "Сравнение двух pcap файлов с генерацией SVG визуализации",
+	Short: "Сравнение двух pcap файлов с генерацией HTML/SVG визуализации",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if compareFormat != "html" && compareFormat != "svg" {
+			return fmt.Errorf("invalid --format value %q: must be html or svg", compareFormat)
+		}
+
 		deltaShowDur, err := time.ParseDuration(compareDeltaShow)
 		if err != nil {
 			return fmt.Errorf("invalid --delta-show value %q: %w", compareDeltaShow, err)
@@ -56,16 +63,34 @@ var CompareCmd = &cobra.Command{
 		}
 		defer f.Close()
 
-		input := svgpkg.CompareInput{
-			Left:               leftStreams,
-			Right:              rightStreams,
-			LeftName:           comparePcap1,
-			RightName:          comparePcap2,
-			DeltaShowThreshMs:  float64(deltaShowDur) / float64(time.Millisecond),
-			DeltaColorThreshMs: float64(deltaColorDur) / float64(time.Millisecond),
-		}
-		if err := svgpkg.RenderCompare(f, input); err != nil {
-			return fmt.Errorf("render svg: %w", err)
+		deltaShowMs := float64(deltaShowDur) / float64(time.Millisecond)
+		deltaColorMs := float64(deltaColorDur) / float64(time.Millisecond)
+
+		switch compareFormat {
+		case "html":
+			input := htmlpkg.CompareInput{
+				Left:               leftStreams,
+				Right:              rightStreams,
+				LeftName:           comparePcap1,
+				RightName:          comparePcap2,
+				DeltaShowThreshMs:  deltaShowMs,
+				DeltaColorThreshMs: deltaColorMs,
+			}
+			if err := htmlpkg.RenderCompare(f, input); err != nil {
+				return fmt.Errorf("render html: %w", err)
+			}
+		case "svg":
+			input := svgpkg.CompareInput{
+				Left:               leftStreams,
+				Right:              rightStreams,
+				LeftName:           comparePcap1,
+				RightName:          comparePcap2,
+				DeltaShowThreshMs:  deltaShowMs,
+				DeltaColorThreshMs: deltaColorMs,
+			}
+			if err := svgpkg.RenderCompare(f, input); err != nil {
+				return fmt.Errorf("render svg: %w", err)
+			}
 		}
 
 		leftTotal := 0
@@ -76,11 +101,12 @@ var CompareCmd = &cobra.Command{
 		for _, s := range rightStreams {
 			rightTotal += len(s)
 		}
-		deltaShowMs := float64(deltaShowDur) / float64(time.Millisecond)
-		deltaCount := countDeltas(leftStreams, rightStreams, leftBase(leftStreams), leftBase(rightStreams), deltaShowMs)
+		lb := leftBase(leftStreams)
+		rb := leftBase(rightStreams)
+		deltaCount, maxDelta, maxDeltaStream := deltaStats(leftStreams, rightStreams, lb, rb, deltaShowMs)
 
-		log.Printf("SVG written to %s (%d left streams/%d msgs, %d right streams/%d msgs, %d msgs with delta > %s)",
-			compareOutput, len(leftStreams), leftTotal, len(rightStreams), rightTotal, deltaCount, compareDeltaShow)
+		log.Printf("%s written to %s (%d left streams/%d msgs, %d right streams/%d msgs, %d msgs with delta > %s, max delta %s in stream %d)",
+			strings.ToUpper(compareFormat), compareOutput, len(leftStreams), leftTotal, len(rightStreams), rightTotal, deltaCount, compareDeltaShow, formatDeltaMs(maxDelta), maxDeltaStream)
 		return nil
 	},
 }
@@ -90,7 +116,8 @@ func init() {
 	CompareCmd.Flags().StringVar(&comparePcap2, "pcap2", "", "Путь ко второму pcap файлу")
 	CompareCmd.Flags().StringVar(&compareHost, "host", "", "PostgreSQL хост в pcap файле")
 	CompareCmd.Flags().Uint16Var(&comparePort, "port", 5432, "PostgreSQL port в pcap файле")
-	CompareCmd.Flags().StringVar(&compareOutput, "output", "compare.svg", "Путь к выходному SVG файлу")
+	CompareCmd.Flags().StringVar(&compareFormat, "format", "html", "Формат вывода: html или svg")
+	CompareCmd.Flags().StringVar(&compareOutput, "output", "compare.html", "Путь к выходному файлу")
 	CompareCmd.Flags().StringVar(&compareDeltaShow, "delta-show", "1ms", "Порог показа дельты в скобках (например 1ms, 500us, 1s)")
 	CompareCmd.Flags().StringVar(&compareDeltaColor, "delta-color", "10ms", "Порог смены цвета сообщения (например 10ms, 1s)")
 
@@ -142,23 +169,46 @@ func leftBase(streams [][]stream.TimelineMessage) time.Time {
 	return base
 }
 
-// countDeltas подсчитывает количество сообщений в правых стримах,
-// у которых относительная дельта по модулю превышает threshMs.
-func countDeltas(left, right [][]stream.TimelineMessage, leftBaseTime, rightBaseTime time.Time, threshMs float64) int {
+// deltaStats подсчитывает количество сообщений с дельтой > threshMs
+// и возвращает максимальную по модулю дельту в миллисекундах.
+func deltaStats(left, right [][]stream.TimelineMessage, leftBaseTime, rightBaseTime time.Time, threshMs float64) (count int, maxDeltaMs float64, maxDeltaStream int) {
 	minStreams := len(left)
 	if len(right) < minStreams {
 		minStreams = len(right)
 	}
-	count := 0
 	for si := 0; si < minStreams; si++ {
 		for mi := 0; mi < len(right[si]) && mi < len(left[si]); mi++ {
 			leftRel := left[si][mi].Timestamp.Sub(leftBaseTime)
 			rightRel := right[si][mi].Timestamp.Sub(rightBaseTime)
 			deltaMs := float64(rightRel-leftRel) / float64(time.Millisecond)
-			if math.Abs(deltaMs) > threshMs {
+			abs := math.Abs(deltaMs)
+			if abs > math.Abs(maxDeltaMs) {
+				maxDeltaMs = deltaMs
+				maxDeltaStream = si + 1
+			}
+			if abs > threshMs {
 				count++
 			}
 		}
 	}
-	return count
+	return
+}
+
+// formatDeltaMs форматирует дельту в миллисекундах в читаемую строку со знаком.
+func formatDeltaMs(ms float64) string {
+	if ms == 0 {
+		return "0ms"
+	}
+	sign := "+"
+	if ms < 0 {
+		sign = ""
+	}
+	abs := math.Abs(ms)
+	if abs >= 1000 {
+		return fmt.Sprintf("%s%.1fs", sign, ms/1000)
+	}
+	if abs >= 1 {
+		return fmt.Sprintf("%s%.1fms", sign, ms)
+	}
+	return fmt.Sprintf("%s%.0fus", sign, ms*1000)
 }
