@@ -97,6 +97,19 @@ body { font-family: sans-serif; background: #fafafa; overflow: hidden; height: 1
 .server { background: #22c55e; }
 .client-delta { background: #ef4444; }
 .server-delta { background: #eab308; }
+.diverged { outline: 2px solid #f97316; outline-offset: -2px; opacity: 0.75; }
+
+.diverge-row {
+  position: absolute; left: 0; right: 0; height: 0;
+  border-top: 2px dashed #f97316;
+  z-index: 5; pointer-events: none;
+}
+.diverge-label {
+  position: absolute; right: 4px; top: -14px;
+  font-size: 9px; color: #f97316; background: #fafafa;
+  padding: 0 3px; border-radius: 2px; white-space: nowrap;
+  pointer-events: none;
+}
 </style>
 </head>
 <body>
@@ -227,7 +240,8 @@ legend.className = 'legend';
 legend.innerHTML = '<span><span class="swatch swatch-client"></span>client</span>' +
   '<span><span class="swatch swatch-server"></span>server</span>' +
   '<span><span class="swatch swatch-client-delta"></span>client delta</span>' +
-  '<span><span class="swatch swatch-server-delta"></span>server delta</span>';
+  '<span><span class="swatch swatch-server-delta"></span>server delta</span>' +
+  '<span><span class="swatch" style="background:#f97316;opacity:.75"></span>diverged</span>';
 headerEl.appendChild(legend);
 
 // Layout
@@ -290,7 +304,7 @@ function render() {
       if (row < msgs.length) {
         const m = msgs[row];
         const relMs = leftRelMs[si][row];
-        cell.appendChild(makeBox(m, relMs, null, false));
+        cell.appendChild(makeBox(m, relMs, null, false, si, row));
       } else {
         cell.innerHTML = '<div class="empty-box"></div><div class="empty-box"></div>';
       }
@@ -310,7 +324,7 @@ function render() {
         const m = msgs[row];
         const relMs = rightRelMs[si][row];
         const di = deltas[si][row];
-        cell.appendChild(makeBox(m, relMs, di, true));
+        cell.appendChild(makeBox(m, relMs, di, true, si, row));
       } else {
         cell.innerHTML = '<div class="empty-box"></div><div class="empty-box"></div>';
       }
@@ -324,7 +338,7 @@ function render() {
   viewport.appendChild(frag);
 }
 
-function makeBox(m, relMs, di, isRight) {
+function makeBox(m, relMs, di, isRight, si, row) {
   const clientBox = document.createElement('div');
   const serverBox = document.createElement('div');
 
@@ -337,7 +351,13 @@ function makeBox(m, relMs, di, isRight) {
   if (isRight && di && di.hasDelta && Math.abs(di.deltaMs) > DATA.deltaColorThreshMs) {
     cls = m.isServer ? 'server-delta' : 'client-delta';
   }
-  activeBox.className = 'msg-box ' + cls;
+
+  const streamRanges = DATA.divergeRanges ? DATA.divergeRanges[si] : null;
+  const isDiverged = streamRanges && streamRanges.some(([start, end]) =>
+    row >= start && (end < 0 || row < end)
+  );
+
+  activeBox.className = 'msg-box ' + cls + (isDiverged ? ' diverged' : '');
 
   let text = formatRelTime(relMs);
   if (isRight && di && di.hasDelta) {
@@ -385,9 +405,51 @@ function esc(s) {
   return d.innerHTML;
 }
 
+// Diverge lines — static, rendered once
+function renderDivergeLines() {
+  document.querySelectorAll('.diverge-row').forEach(e => e.remove());
+  if (!DATA.divergeRanges) return;
+
+  function makeLine(rowIdx, label) {
+    const el = document.createElement('div');
+    el.className = 'diverge-row';
+    el.style.top = (rowIdx * ROW_HEIGHT - 2) + 'px';
+    if (label) {
+      const lbl = document.createElement('div');
+      lbl.className = 'diverge-label';
+      lbl.textContent = label;
+      el.appendChild(lbl);
+    }
+    viewport.appendChild(el);
+  }
+
+  // Collect start/end rows across all streams, merge labels for same row
+  const startMap = new Map(); // rowIdx -> Set of stream nums
+  const endMap   = new Map();
+
+  DATA.divergeRanges.forEach((ranges, si) => {
+    ranges.forEach(([start, end]) => {
+      if (!startMap.has(start)) startMap.set(start, new Set());
+      startMap.get(start).add(si + 1);
+      if (end >= 0) {
+        if (!endMap.has(end)) endMap.set(end, new Set());
+        endMap.get(end).add(si + 1);
+      }
+    });
+  });
+
+  startMap.forEach((streams, rowIdx) => {
+    makeLine(rowIdx, 'diverge start S' + [...streams].join(',S'));
+  });
+  endMap.forEach((streams, rowIdx) => {
+    makeLine(rowIdx, 'diverge end S' + [...streams].join(',S'));
+  });
+}
+
 container.addEventListener('scroll', render);
 window.addEventListener('resize', forceRender);
 render();
+renderDivergeLines();
 </script>
 </body>
 </html>`

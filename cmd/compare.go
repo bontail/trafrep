@@ -13,21 +13,21 @@ import (
 	"github.com/google/gopacket/pcap"
 	"github.com/spf13/cobra"
 
+	htmlpkg "trafRep/internal/html"
 	pcappkg "trafRep/internal/pcap"
 	"trafRep/internal/stream"
-	htmlpkg "trafRep/internal/html"
 	svgpkg "trafRep/internal/svg"
 )
 
 var (
-	comparePcap1        string
-	comparePcap2        string
-	compareHost         string
-	comparePort         uint16
-	compareOutput       string
-	compareFormat       string
-	compareDeltaShow    string
-	compareDeltaColor   string
+	comparePcap1      string
+	comparePcap2      string
+	compareHost       string
+	comparePort       uint16
+	compareOutput     string
+	compareFormat     string
+	compareDeltaShow  string
+	compareDeltaColor string
 )
 
 // CompareCmd генерирует визуализацию двух pcap-таймлайнов (HTML или SVG).
@@ -48,13 +48,25 @@ var CompareCmd = &cobra.Command{
 			return fmt.Errorf("invalid --delta-color value %q: %w", compareDeltaColor, err)
 		}
 
-		leftStreams, err := extractStreamTimelines(comparePcap1, compareHost, comparePort)
+		leftTimelines, err := extractStreams(comparePcap1, compareHost, comparePort)
 		if err != nil {
 			return fmt.Errorf("pcap1: %w", err)
 		}
-		rightStreams, err := extractStreamTimelines(comparePcap2, compareHost, comparePort)
+		rightTimelines, err := extractStreams(comparePcap2, compareHost, comparePort)
 		if err != nil {
 			return fmt.Errorf("pcap2: %w", err)
+		}
+
+		divergeInfos := stream.FindDivergeInfo(leftTimelines, rightTimelines)
+		logDivergeInfo(divergeInfos)
+
+		divergeRanges := make([][][2]int, len(divergeInfos))
+		for i, di := range divergeInfos {
+			ranges := make([][2]int, len(di.Ranges))
+			for j, r := range di.Ranges {
+				ranges[j] = [2]int{r.Start, r.End}
+			}
+			divergeRanges[i] = ranges
 		}
 
 		f, err := os.Create(compareOutput)
@@ -69,24 +81,26 @@ var CompareCmd = &cobra.Command{
 		switch compareFormat {
 		case "html":
 			input := htmlpkg.CompareInput{
-				Left:               leftStreams,
-				Right:              rightStreams,
+				Left:               leftTimelines,
+				Right:              rightTimelines,
 				LeftName:           comparePcap1,
 				RightName:          comparePcap2,
 				DeltaShowThreshMs:  deltaShowMs,
 				DeltaColorThreshMs: deltaColorMs,
+				DivergeRanges:      divergeRanges,
 			}
 			if err := htmlpkg.RenderCompare(f, input); err != nil {
 				return fmt.Errorf("render html: %w", err)
 			}
 		case "svg":
 			input := svgpkg.CompareInput{
-				Left:               leftStreams,
-				Right:              rightStreams,
+				Left:               leftTimelines,
+				Right:              rightTimelines,
 				LeftName:           comparePcap1,
 				RightName:          comparePcap2,
 				DeltaShowThreshMs:  deltaShowMs,
 				DeltaColorThreshMs: deltaColorMs,
+				DivergeRanges:      divergeRanges,
 			}
 			if err := svgpkg.RenderCompare(f, input); err != nil {
 				return fmt.Errorf("render svg: %w", err)
@@ -94,21 +108,50 @@ var CompareCmd = &cobra.Command{
 		}
 
 		leftTotal := 0
-		for _, s := range leftStreams {
+		for _, s := range leftTimelines {
 			leftTotal += len(s)
 		}
 		rightTotal := 0
-		for _, s := range rightStreams {
+		for _, s := range rightTimelines {
 			rightTotal += len(s)
 		}
-		lb := leftBase(leftStreams)
-		rb := leftBase(rightStreams)
-		deltaCount, maxDelta, maxDeltaStream := deltaStats(leftStreams, rightStreams, lb, rb, deltaShowMs)
+		lb := timelineBase(leftTimelines)
+		rb := timelineBase(rightTimelines)
+		deltaCount, maxDelta, maxDeltaStream := deltaStats(leftTimelines, rightTimelines, lb, rb, deltaShowMs)
 
 		log.Printf("%s written to %s (%d left streams/%d msgs, %d right streams/%d msgs, %d msgs with delta > %s, max delta %s in stream %d)",
-			strings.ToUpper(compareFormat), compareOutput, len(leftStreams), leftTotal, len(rightStreams), rightTotal, deltaCount, compareDeltaShow, formatDeltaMs(maxDelta), maxDeltaStream)
+			strings.ToUpper(compareFormat), compareOutput,
+			len(leftTimelines), leftTotal, len(rightTimelines), rightTotal,
+			deltaCount, compareDeltaShow, formatDeltaMs(maxDelta), maxDeltaStream)
 		return nil
 	},
+}
+
+// logDivergeInfo выводит в лог информацию о всех диапазонах расхождений по каждому стриму.
+func logDivergeInfo(infos []stream.DivergeInfo) {
+	for _, info := range infos {
+		streamNum := info.StreamIndex + 1
+		if len(info.Ranges) == 0 {
+			log.Printf("Stream %d: identical", streamNum)
+			continue
+		}
+		for ri, r := range info.Ranges {
+			rangeNum := ri + 1
+			if r.LeftType == "" {
+				log.Printf("Stream %d range %d: only present in right pcap, from #%d to end (first msg: %q)",
+					streamNum, rangeNum, r.Start+1, r.RightType)
+			} else if r.RightType == "" {
+				log.Printf("Stream %d range %d: only present in left pcap, from #%d to end (first msg: %q)",
+					streamNum, rangeNum, r.Start+1, r.LeftType)
+			} else if r.End < 0 {
+				log.Printf("Stream %d range %d: diverge from #%d to end — left=%q right=%q",
+					streamNum, rangeNum, r.Start+1, r.LeftType, r.RightType)
+			} else {
+				log.Printf("Stream %d range %d: diverge #%d–#%d (resync at #%d) — left=%q right=%q",
+					streamNum, rangeNum, r.Start+1, r.End, r.End+1, r.LeftType, r.RightType)
+			}
+		}
+	}
 }
 
 func init() {
@@ -125,8 +168,8 @@ func init() {
 	_ = CompareCmd.MarkFlagRequired("pcap2")
 }
 
-// extractStreamTimelines открывает pcap файл, собирает стримы и возвращает таймлайны по стримам.
-func extractStreamTimelines(pcapPath, host string, port uint16) ([][]stream.TimelineMessage, error) {
+// extractStreams открывает pcap файл и возвращает таймлайны по стримам.
+func extractStreams(pcapPath, host string, port uint16) ([][]stream.TimelineMessage, error) {
 	handle, err := pcap.OpenOffline(pcapPath)
 	if err != nil {
 		return nil, fmt.Errorf("open pcap: %w", err)
@@ -156,8 +199,8 @@ func extractStreamTimelines(pcapPath, host string, port uint16) ([][]stream.Time
 	return manager.GetStreamTimelines(), nil
 }
 
-// leftBase возвращает самую раннюю временну́ю метку среди всех сообщений всех стримов.
-func leftBase(streams [][]stream.TimelineMessage) time.Time {
+// timelineBase возвращает самую раннюю временну́ю метку среди всех сообщений всех стримов.
+func timelineBase(streams [][]stream.TimelineMessage) time.Time {
 	var base time.Time
 	for _, s := range streams {
 		for _, m := range s {

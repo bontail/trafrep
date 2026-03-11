@@ -70,6 +70,7 @@ type TimelineMessage struct {
 	Timestamp time.Time
 	TypeName  string
 	IsServer  bool
+	QueryText string // текст SQL-запроса (только для Query-сообщений, иначе "")
 }
 
 // TCPStream хранит буферы и сегменты для двух направлений одного TCP-потока.
@@ -196,11 +197,15 @@ func (m *TCPStreamManager) GetStreamTimelines() [][]TimelineMessage {
 		var timeline []TimelineMessage
 		if i < len(clientStreams) {
 			for _, msg := range clientStreams[i] {
-				timeline = append(timeline, TimelineMessage{
+				tm := TimelineMessage{
 					Timestamp: msg.FirstTCPPacketTimestamp,
 					TypeName:  msg.Type.String(),
 					IsServer:  false,
-				})
+				}
+				if msg.Type.IsSimpleQuery() {
+					tm.QueryText = msg.PrettyQuery()
+				}
+				timeline = append(timeline, tm)
 			}
 		}
 		if i < len(serverStreams) {
@@ -473,4 +478,131 @@ func (s *TCPStream) clientMessageType() msgtypes.ClientMessageType {
 		return msgtypes.StartupMessage
 	}
 	return preliminaryType
+}
+
+// DivergeRange описывает один диапазон расхождения типов сообщений внутри стрима.
+type DivergeRange struct {
+	// Start — индекс первого расходящегося сообщения.
+	Start int
+	// End — индекс первого сообщения после расхождения, где типы совпали снова.
+	// -1 означает расхождение до конца стрима.
+	End int
+	// LeftType / RightType — типы сообщений в начале диапазона.
+	LeftType  string
+	RightType string
+}
+
+// DivergeInfo описывает все диапазоны расхождения двух стримов по типам сообщений.
+type DivergeInfo struct {
+	// StreamIndex — номер стрима (0-based).
+	StreamIndex int
+	// Ranges — все найденные диапазоны расхождений. Пустой срез = стримы идентичны.
+	Ranges []DivergeRange
+}
+
+// FindDivergeInfo сравнивает два набора таймлайнов (клиент+сервер) по типам сообщений.
+// Для каждого стрима возвращает все диапазоны [Start, End) где типы расходятся.
+func FindDivergeInfo(left, right [][]TimelineMessage) []DivergeInfo {
+	count := len(left)
+	if len(right) > count {
+		count = len(right)
+	}
+
+	result := make([]DivergeInfo, count)
+	for si := 0; si < count; si++ {
+		info := DivergeInfo{StreamIndex: si}
+
+		if si >= len(left) {
+			leftType := ""
+			if len(right[si]) > 0 {
+				leftType = right[si][0].TypeName
+			}
+			info.Ranges = []DivergeRange{{Start: 0, End: -1, RightType: leftType}}
+			result[si] = info
+			continue
+		}
+		if si >= len(right) {
+			rightType := ""
+			if len(left[si]) > 0 {
+				rightType = left[si][0].TypeName
+			}
+			info.Ranges = []DivergeRange{{Start: 0, End: -1, LeftType: rightType}}
+			result[si] = info
+			continue
+		}
+
+		l, r := left[si], right[si]
+		minLen := len(l)
+		if len(r) < minLen {
+			minLen = len(r)
+		}
+
+		mi := 0
+		for mi < minLen {
+			// Ищем начало расхождения
+			if l[mi].TypeName == r[mi].TypeName {
+				mi++
+				continue
+			}
+			rng := DivergeRange{
+				Start:     mi,
+				End:       -1,
+				LeftType:  l[mi].TypeName,
+				RightType: r[mi].TypeName,
+			}
+			// Ищем конец расхождения
+			mi++
+			for mi < minLen {
+				if l[mi].TypeName == r[mi].TypeName {
+					rng.End = mi
+					break
+				}
+				mi++
+			}
+			info.Ranges = append(info.Ranges, rng)
+			// Если нашли конец — продолжаем с этой же позиции (она уже совпала)
+			// Если не нашли (End == -1) — выходим из цикла
+			if rng.End < 0 {
+				break
+			}
+		}
+
+		// Если длины разные и в конце общей части всё совпало — добавляем диапазон "хвост"
+		if len(l) != len(r) {
+			// Проверяем: последний диапазон не закрыт до самого minLen
+			lastCovered := 0
+			if len(info.Ranges) > 0 {
+				last := info.Ranges[len(info.Ranges)-1]
+				if last.End < 0 {
+					lastCovered = minLen // уже покрыто до конца
+				} else {
+					lastCovered = last.End
+				}
+			}
+			if lastCovered <= minLen && minLen < max(len(l), len(r)) {
+				leftType, rightType := "", ""
+				if minLen < len(l) {
+					leftType = l[minLen].TypeName
+				} else {
+					rightType = r[minLen].TypeName
+				}
+				info.Ranges = append(info.Ranges, DivergeRange{
+					Start:     minLen,
+					End:       -1,
+					LeftType:  leftType,
+					RightType: rightType,
+				})
+			}
+		}
+
+		result[si] = info
+	}
+	return result
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

@@ -17,6 +17,8 @@ type CompareInput struct {
 	RightName          string
 	DeltaShowThreshMs  float64
 	DeltaColorThreshMs float64
+	// DivergeRanges[i] — все диапазоны расхождений стрима i, каждый [start, end] (end==-1 до конца).
+	DivergeRanges [][][2]int
 }
 
 const (
@@ -189,6 +191,19 @@ func RenderCompare(w io.Writer, input CompareInput) error {
 	// Легенда — правая половина (с дельта-цветами)
 	writeLegend(w, lo.rightHalfX, true)
 
+	// inDivergeRange проверяет, попадает ли индекс mi в любой из диапазонов расхождения стрима si.
+	inDivergeRange := func(si, mi int) bool {
+		if si >= len(input.DivergeRanges) {
+			return false
+		}
+		for _, r := range input.DivergeRanges[si] {
+			if mi >= r[0] && (r[1] < 0 || mi < r[1]) {
+				return true
+			}
+		}
+		return false
+	}
+
 	// Сообщения левой половины
 	for si, msgs := range input.Left {
 		sx := streamX(lo.leftHalfX, si)
@@ -196,7 +211,7 @@ func RenderCompare(w io.Writer, input CompareInput) error {
 		serverX := sx + subColWidth + subColGap
 		for mi, msg := range msgs {
 			y := headerHeight + mi*(msgHeight+msgGap)
-			renderMsg(w, msg, leftBase, clientX, serverX, y, nil, 0)
+			renderMsg(w, msg, leftBase, clientX, serverX, y, nil, 0, inDivergeRange(si, mi))
 		}
 	}
 
@@ -211,7 +226,39 @@ func RenderCompare(w io.Writer, input CompareInput) error {
 			if mi < len(deltas[si]) && deltas[si][mi].hasDelta {
 				di = &deltas[si][mi]
 			}
-			renderMsg(w, msg, rightBase, clientX, serverX, y, di, input.DeltaColorThreshMs)
+			renderMsg(w, msg, rightBase, clientX, serverX, y, di, input.DeltaColorThreshMs, inDivergeRange(si, mi))
+		}
+	}
+
+	// Линии расхождения (начало и конец каждого диапазона)
+	drawDivergeLine := func(halfX, si, rowIdx int, label string) {
+		lx := streamX(halfX, si)
+		lw := streamColWidth()
+		y := headerHeight + rowIdx*(msgHeight+msgGap) - 3
+		fmt.Fprintf(w, `<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#f97316" stroke-width="2" stroke-dasharray="4,3"/>`+"\n",
+			lx, y, lx+lw, y)
+		if label != "" {
+			fmt.Fprintf(w, `<text x="%d" y="%d" font-family="sans-serif" font-size="9" fill="#f97316">%s</text>`+"\n",
+				lx, y-1, label)
+		}
+	}
+
+	for si, ranges := range input.DivergeRanges {
+		for ri, r := range ranges {
+			startLabel := fmt.Sprintf("diverge start %d", ri+1)
+			endLabel := fmt.Sprintf("diverge end %d", ri+1)
+			if si < lo.leftStreams {
+				drawDivergeLine(lo.leftHalfX, si, r[0], startLabel)
+				if r[1] >= 0 {
+					drawDivergeLine(lo.leftHalfX, si, r[1], endLabel)
+				}
+			}
+			if si < lo.rightStreams {
+				drawDivergeLine(lo.rightHalfX, si, r[0], "")
+				if r[1] >= 0 {
+					drawDivergeLine(lo.rightHalfX, si, r[1], "")
+				}
+			}
 		}
 	}
 
@@ -237,7 +284,8 @@ func writeLegend(w io.Writer, x int, withDelta bool) {
 
 // renderMsg рисует одно сообщение (прямоугольник + текст) в соответствующей субколонке.
 // При наличии deltaInfo и превышении colorThreshMs меняет цвет прямоугольника.
-func renderMsg(w io.Writer, msg stream.TimelineMessage, baseTime time.Time, clientX, serverX, y int, di *deltaInfo, colorThreshMs float64) {
+// isDiverged добавляет оранжевую обводку, сигнализирующую о расхождении с другим pcap.
+func renderMsg(w io.Writer, msg stream.TimelineMessage, baseTime time.Time, clientX, serverX, y int, di *deltaInfo, colorThreshMs float64, isDiverged bool) {
 	x := clientX
 	rectClass := "client-rect"
 	if msg.IsServer {
@@ -245,7 +293,6 @@ func renderMsg(w io.Writer, msg stream.TimelineMessage, baseTime time.Time, clie
 		rectClass = "server-rect"
 	}
 
-	// Если дельта > порога — меняем цвет
 	if di != nil && math.Abs(di.deltaMs) > colorThreshMs {
 		if msg.IsServer {
 			rectClass = "server-delta-rect"
@@ -263,8 +310,13 @@ func renderMsg(w io.Writer, msg stream.TimelineMessage, baseTime time.Time, clie
 		deltaStr = fmt.Sprintf("(%s)", formatDelta(di.deltaMs))
 	}
 
-	fmt.Fprintf(w, `<rect x="%d" y="%d" width="%d" height="%d" class="%s"/>`,
-		x, y, subColWidth, msgHeight, rectClass)
+	strokeAttr := ""
+	if isDiverged {
+		strokeAttr = ` stroke="#f97316" stroke-width="2"`
+	}
+
+	fmt.Fprintf(w, `<rect x="%d" y="%d" width="%d" height="%d" class="%s"%s/>`,
+		x, y, subColWidth, msgHeight, rectClass, strokeAttr)
 	if deltaStr != "" {
 		fmt.Fprintf(w, `<text x="%d" y="%d" class="msg-text">%s(%s) %s</text>`+"\n",
 			x+3, y+msgHeight/2+4, tsStr, formatDelta(di.deltaMs), escapeXML(label))

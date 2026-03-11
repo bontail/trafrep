@@ -23,6 +23,8 @@ type jsonCompareData struct {
 	RightName          string          `json:"rightName"`
 	DeltaShowThreshMs  float64         `json:"deltaShowThreshMs"`
 	DeltaColorThreshMs float64         `json:"deltaColorThreshMs"`
+	// DivergeRanges[i] — все диапазоны расхождений стрима i, каждый [start, end] (end==-1 до конца).
+	DivergeRanges [][][2]int `json:"divergeRanges"`
 }
 
 // CompareInput contains the data needed to render an HTML comparison of two pcap files.
@@ -33,6 +35,8 @@ type CompareInput struct {
 	RightName          string
 	DeltaShowThreshMs  float64
 	DeltaColorThreshMs float64
+	// DivergeRanges[i] — все диапазоны расхождений стрима i, каждый [start, end] (end==-1 до конца).
+	DivergeRanges [][][2]int
 }
 
 // RenderCompare writes a self-contained HTML document with virtual-scroll comparison.
@@ -51,6 +55,7 @@ func RenderCompare(w io.Writer, input CompareInput) error {
 		RightName:          input.RightName,
 		DeltaShowThreshMs:  input.DeltaShowThreshMs,
 		DeltaColorThreshMs: input.DeltaColorThreshMs,
+		DivergeRanges:      input.DivergeRanges,
 	}
 
 	jsonBytes, err := json.Marshal(data)
