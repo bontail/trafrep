@@ -1,6 +1,7 @@
 package pcap
 
 import (
+	"fmt"
 	"net"
 	"time"
 
@@ -23,10 +24,12 @@ type TCPPacket struct {
 
 // ExtractPackets читает пакеты из handle и возвращает TCPPacket,
 // соответствующие заданному filterIP и filterPort.
-// Функция возвращает только те пакеты, у которых src или dst совпадает с filterIP и
-// соответствующий порт равен filterPort.
+// Retransmission-пакеты (seq < ожидаемого следующего) пропускаются.
 func ExtractPackets(handle *pcap.Handle, filterIP net.IP, filterPort uint16) []TCPPacket {
 	var packets []TCPPacket
+	// nextSeq хранит следующий ожидаемый sequence number для каждого направления потока.
+	nextSeq := make(map[string]uint32)
+
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 
 	for packet := range packetSource.Packets() {
@@ -40,6 +43,17 @@ func ExtractPackets(handle *pcap.Handle, filterIP net.IP, filterPort uint16) []T
 			(uint16(tcp.DstPort) == filterPort && (ipDst.Equal(filterIP) || filterIP == nil))) {
 			continue
 		}
+
+		key := fmt.Sprintf("%s:%d->%s:%d", ipSrc, uint16(tcp.SrcPort), ipDst, uint16(tcp.DstPort))
+		seq := tcp.Seq
+		payloadLen := uint32(len(tcp.Payload))
+
+		if expected, seen := nextSeq[key]; seen {
+			if seq < expected {
+				continue
+			}
+		}
+		nextSeq[key] = seq + payloadLen
 
 		packets = append(packets, TCPPacket{
 			Timestamp:  packet.Metadata().Timestamp,

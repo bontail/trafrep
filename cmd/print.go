@@ -92,7 +92,7 @@ var PrintCmd = &cobra.Command{
 		packets := pcappkg.ExtractPackets(handle, filterIP, PcapPostgresPort)
 		log.Printf("Extracted %d tcp packets", len(packets))
 
-		sort.Slice(packets, func(i, j int) bool {
+		sort.SliceStable(packets, func(i, j int) bool {
 			return packets[i].Timestamp.Before(packets[j].Timestamp)
 		})
 
@@ -124,7 +124,7 @@ var PrintCmd = &cobra.Command{
 			messages = append(messages, s...)
 		}
 
-		sort.Slice(messages, func(i, j int) bool {
+		sort.SliceStable(messages, func(i, j int) bool {
 			return messages[i].FirstTCPPacketTimestamp.Before(messages[j].FirstTCPPacketTimestamp)
 		})
 

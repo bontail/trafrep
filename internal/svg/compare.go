@@ -154,7 +154,6 @@ func RenderCompare(w io.Writer, input CompareInput) error {
 		lo.totalWidth, lo.totalHeight, lo.totalWidth, lo.totalHeight,
 		fontSizeName, fontSizeSub, fontSizeStream, fontSizeMsg,
 	)
-
 	// Вертикальный разделитель
 	divX := lo.rightHalfX - halfDivider/2
 	fmt.Fprintf(w, `<line x1="%d" y1="0" x2="%d" y2="%d" stroke="#ccc" stroke-width="2"/>`+"\n",

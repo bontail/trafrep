@@ -50,7 +50,7 @@ var ReplayCmd = &cobra.Command{
 		)
 		log.Printf("Extracted %d tcp packets", len(packets))
 
-		sort.Slice(packets, func(i, j int) bool {
+		sort.SliceStable(packets, func(i, j int) bool {
 			return packets[i].Timestamp.
 				Before(packets[j].Timestamp)
 		})

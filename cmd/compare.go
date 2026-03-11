@@ -183,7 +183,7 @@ func extractStreams(pcapPath, host string, port uint16) ([][]stream.TimelineMess
 	packets := pcappkg.ExtractPackets(handle, filterIP, port)
 	log.Printf("Extracted %d tcp packets from %s", len(packets), pcapPath)
 
-	sort.Slice(packets, func(i, j int) bool {
+	sort.SliceStable(packets, func(i, j int) bool {
 		return packets[i].Timestamp.Before(packets[j].Timestamp)
 	})
 

@@ -140,7 +140,7 @@ func (m *TCPStreamManager) allStreamsSorted() []*TCPStream {
 	for _, s := range m.activeStreams {
 		streams = append(streams, s)
 	}
-	sort.Slice(streams, func(i, j int) bool {
+	sort.SliceStable(streams, func(i, j int) bool {
 		return streamFirstTimestamp(streams[i]).Before(streamFirstTimestamp(streams[j]))
 	})
 	return streams
@@ -217,7 +217,7 @@ func (m *TCPStreamManager) GetStreamTimelines() [][]TimelineMessage {
 				})
 			}
 		}
-		sort.Slice(timeline, func(a, b int) bool {
+		sort.SliceStable(timeline, func(a, b int) bool {
 			return timeline[a].Timestamp.Before(timeline[b].Timestamp)
 		})
 		result[i] = timeline
