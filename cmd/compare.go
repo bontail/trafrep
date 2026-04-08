@@ -16,7 +16,6 @@ import (
 	htmlpkg "trafRep/internal/html"
 	pcappkg "trafRep/internal/pcap"
 	"trafRep/internal/stream"
-	svgpkg "trafRep/internal/svg"
 )
 
 var (
@@ -92,19 +91,8 @@ var CompareCmd = &cobra.Command{
 			if err := htmlpkg.RenderCompare(f, input); err != nil {
 				return fmt.Errorf("render html: %w", err)
 			}
-		case "svg":
-			input := svgpkg.CompareInput{
-				Left:               leftTimelines,
-				Right:              rightTimelines,
-				LeftName:           comparePcap1,
-				RightName:          comparePcap2,
-				DeltaShowThreshMs:  deltaShowMs,
-				DeltaColorThreshMs: deltaColorMs,
-				DivergeRanges:      divergeRanges,
-			}
-			if err := svgpkg.RenderCompare(f, input); err != nil {
-				return fmt.Errorf("render svg: %w", err)
-			}
+		default:
+			return fmt.Errorf("unsupported format: %s", compareFormat)
 		}
 
 		leftTotal := 0

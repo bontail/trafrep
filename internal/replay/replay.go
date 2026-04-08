@@ -189,16 +189,16 @@ func sendGroup(conn net.Conn, group PacketGroup, config Config, streamNumber int
 		return fmt.Errorf("(%d) group %d/%d ERROR - waiting server message failed: %v", streamNumber, index, total, err)
 	}
 
-	msg := fmt.Sprintf("(%d) Group %d/%d SUCCESS", streamNumber, index, total)
 	if config.PrintQuery {
+		msg := fmt.Sprintf("(%d) Group %d/%d SUCCESS", streamNumber, index, total)
 		for _, m := range group.messages {
 			msg += fmt.Sprintf(" Type: %s,", m.Type)
 			if m.Type.IsSimpleQuery() {
 				msg += fmt.Sprintf(" QUERY: %s", m.PrettyQuery())
 			}
 		}
+		log.Printf(msg)
 	}
-	log.Printf(msg)
 	return nil
 }
 

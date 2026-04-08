@@ -11,6 +11,7 @@ import (
 
 	pcappkg "trafRep/internal/pcap"
 	"trafRep/internal/stream"
+	"trafRep/internal/stream/message_types"
 )
 
 // FilterSide задаёт сторону соединения, сообщения которой выводит команда print.
@@ -131,7 +132,7 @@ var PrintCmd = &cobra.Command{
 		for i, m := range messages {
 			typ := m.Type.String()
 			query := "-"
-			if m.Type.IsSimpleQuery() {
+			if m.Type.IsSimpleQuery() || m.Type == message_types.Parse {
 				query = m.PrettyQuery()
 			}
 			fmt.Printf("%3d | %s | %s | %s\n",
