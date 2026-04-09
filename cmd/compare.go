@@ -72,7 +72,7 @@ var CompareCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("create output: %w", err)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 
 		deltaShowMs := float64(deltaShowDur) / float64(time.Millisecond)
 		deltaColorMs := float64(deltaColorDur) / float64(time.Millisecond)
@@ -105,12 +105,28 @@ var CompareCmd = &cobra.Command{
 		}
 		lb := timelineBase(leftTimelines)
 		rb := timelineBase(rightTimelines)
-		deltaCount, maxDelta, maxDeltaStream := deltaStats(leftTimelines, rightTimelines, lb, rb, deltaShowMs)
+		delta := collectDeltaStats(leftTimelines, rightTimelines, lb, rb, deltaShowMs)
 
-		log.Printf("%s written to %s (%d left streams/%d msgs, %d right streams/%d msgs, %d msgs with delta > %s, max delta %s in stream %d)",
+		log.Printf("%s written to %s (%d left streams/%d msgs, %d right streams/%d msgs, %d groups with delta > %s, max delta %s in stream %d)",
 			strings.ToUpper(compareFormat), compareOutput,
 			len(leftTimelines), leftTotal, len(rightTimelines), rightTotal,
-			deltaCount, compareDeltaShow, formatDeltaMs(maxDelta), maxDeltaStream)
+			delta.AboveCount, compareDeltaShow, formatDeltaMs(delta.AboveMaxMs), delta.AboveMaxStream)
+
+		if delta.SkippedMismatchCount > 0 {
+			log.Printf("Delta skipped mismatches: %d (different group shape/type/side at same group index)", delta.SkippedMismatchCount)
+		}
+		if len(delta.TopPositive) > 0 {
+			log.Printf("Top %d positive server-group deltas by abs:", len(delta.TopPositive))
+			for i, d := range delta.TopPositive {
+				log.Printf("  #%d delta=%s stream=%d group=%d msgs=%d (%d-%d)", i+1, formatDeltaMs(d.DeltaMs), d.Stream, d.GroupIndex, d.MsgCount, d.MsgFrom, d.MsgTo)
+			}
+		}
+		if len(delta.TopNegative) > 0 {
+			log.Printf("Top %d negative server-group deltas by abs:", len(delta.TopNegative))
+			for i, d := range delta.TopNegative {
+				log.Printf("  #%d delta=%s stream=%d group=%d msgs=%d (%d-%d)", i+1, formatDeltaMs(d.DeltaMs), d.Stream, d.GroupIndex, d.MsgCount, d.MsgFrom, d.MsgTo)
+			}
+		}
 		return nil
 	},
 }
@@ -200,29 +216,182 @@ func timelineBase(streams [][]stream.TimelineMessage) time.Time {
 	return base
 }
 
-// deltaStats подсчитывает количество сообщений с дельтой > threshMs
-// и возвращает максимальную по модулю дельту в миллисекундах.
-func deltaStats(left, right [][]stream.TimelineMessage, leftBaseTime, rightBaseTime time.Time, threshMs float64) (count int, maxDeltaMs float64, maxDeltaStream int) {
+type timelineGroup struct {
+	GroupIndex int
+	MsgFrom    int
+	MsgTo      int
+	MsgCount   int
+	Timestamp  time.Time
+	IsServer   bool
+	TypeSig    string
+	TypePretty string
+}
+
+func buildTimelineGroups(streamMsgs []stream.TimelineMessage) []timelineGroup {
+	if len(streamMsgs) == 0 {
+		return nil
+	}
+	groups := make([]timelineGroup, 0, len(streamMsgs))
+	start := 0
+	for i := 1; i <= len(streamMsgs); i++ {
+		split := i == len(streamMsgs) ||
+			!streamMsgs[i].Timestamp.Equal(streamMsgs[start].Timestamp) ||
+			streamMsgs[i].IsServer != streamMsgs[start].IsServer
+		if !split {
+			continue
+		}
+
+		part := streamMsgs[start:i]
+		sigParts := make([]string, 0, len(part))
+		for _, m := range part {
+			sigParts = append(sigParts, m.TypeName)
+		}
+		typeSig := strings.Join(sigParts, "|")
+		typePretty := typeSig
+		if len(typePretty) > 120 {
+			typePretty = typePretty[:117] + "..."
+		}
+		groups = append(groups, timelineGroup{
+			GroupIndex: len(groups) + 1,
+			MsgFrom:    start + 1,
+			MsgTo:      i,
+			MsgCount:   i - start,
+			Timestamp:  streamMsgs[start].Timestamp,
+			IsServer:   streamMsgs[start].IsServer,
+			TypeSig:    typeSig,
+			TypePretty: typePretty,
+		})
+		start = i
+	}
+	return groups
+}
+
+type deltaEntry struct {
+	Stream      int
+	GroupIndex  int
+	MsgFrom     int
+	MsgTo       int
+	MsgCount    int
+	DeltaMs     float64
+	TypeSummary string
+	IsServer    bool
+}
+
+// deltaStatsSummary агрегирует дельты по всем сопоставленным сообщениям.
+type deltaStatsSummary struct {
+	MatchedCount   int
+	SumDeltaMs     float64
+	SumAbsMs       float64
+	MaxDeltaMs     float64
+	MaxDeltaStream int
+
+	SkippedMismatchCount int
+
+	AboveCount     int
+	AboveSumMs     float64
+	AboveAbsMs     float64
+	AboveMaxMs     float64
+	AboveMaxStream int
+
+	TopPositive []deltaEntry
+	TopNegative []deltaEntry
+}
+
+func pushTopPositive(top []deltaEntry, candidate deltaEntry, limit int) []deltaEntry {
+	if candidate.DeltaMs <= 0 {
+		return top
+	}
+	top = append(top, candidate)
+	sort.SliceStable(top, func(i, j int) bool {
+		return top[i].DeltaMs > top[j].DeltaMs
+	})
+	if len(top) > limit {
+		top = top[:limit]
+	}
+	return top
+}
+
+func pushTopNegative(top []deltaEntry, candidate deltaEntry, limit int) []deltaEntry {
+	if candidate.DeltaMs >= 0 {
+		return top
+	}
+	top = append(top, candidate)
+	sort.SliceStable(top, func(i, j int) bool {
+		return math.Abs(top[i].DeltaMs) > math.Abs(top[j].DeltaMs)
+	})
+	if len(top) > limit {
+		top = top[:limit]
+	}
+	return top
+}
+
+// collectDeltaStats подсчитывает агрегаты дельты для всех сопоставленных сообщений
+// и отдельно для сообщений, чей модуль дельты выше порога threshMs.
+func collectDeltaStats(left, right [][]stream.TimelineMessage, leftBaseTime, rightBaseTime time.Time, threshMs float64) deltaStatsSummary {
+	stats := deltaStatsSummary{}
 	minStreams := len(left)
 	if len(right) < minStreams {
 		minStreams = len(right)
 	}
+
 	for si := 0; si < minStreams; si++ {
-		for mi := 0; mi < len(right[si]) && mi < len(left[si]); mi++ {
-			leftRel := left[si][mi].Timestamp.Sub(leftBaseTime)
-			rightRel := right[si][mi].Timestamp.Sub(rightBaseTime)
+		leftGroups := buildTimelineGroups(left[si])
+		rightGroups := buildTimelineGroups(right[si])
+		minGroups := len(leftGroups)
+		if len(rightGroups) < minGroups {
+			minGroups = len(rightGroups)
+		}
+
+		for gi := 0; gi < minGroups; gi++ {
+			leftGroup := leftGroups[gi]
+			rightGroup := rightGroups[gi]
+			if leftGroup.IsServer != rightGroup.IsServer || leftGroup.MsgCount != rightGroup.MsgCount || leftGroup.TypeSig != rightGroup.TypeSig {
+				stats.SkippedMismatchCount++
+				continue
+			}
+			leftRel := leftGroup.Timestamp.Sub(leftBaseTime)
+			rightRel := rightGroup.Timestamp.Sub(rightBaseTime)
 			deltaMs := float64(rightRel-leftRel) / float64(time.Millisecond)
 			abs := math.Abs(deltaMs)
-			if abs > math.Abs(maxDeltaMs) {
-				maxDeltaMs = deltaMs
-				maxDeltaStream = si + 1
+
+			entry := deltaEntry{
+				Stream:      si + 1,
+				GroupIndex:  leftGroup.GroupIndex,
+				MsgFrom:     leftGroup.MsgFrom,
+				MsgTo:       leftGroup.MsgTo,
+				MsgCount:    leftGroup.MsgCount,
+				DeltaMs:     deltaMs,
+				TypeSummary: leftGroup.TypePretty,
+				IsServer:    leftGroup.IsServer,
 			}
+			if leftGroup.IsServer {
+				stats.TopPositive = pushTopPositive(stats.TopPositive, entry, 5)
+				stats.TopNegative = pushTopNegative(stats.TopNegative, entry, 5)
+			}
+
+			stats.MatchedCount++
+			stats.SumDeltaMs += deltaMs
+			stats.SumAbsMs += abs
+
+			if abs > math.Abs(stats.MaxDeltaMs) {
+				stats.MaxDeltaMs = deltaMs
+				stats.MaxDeltaStream = si + 1
+			}
+
 			if abs > threshMs {
-				count++
+				stats.AboveCount++
+				stats.AboveSumMs += deltaMs
+				stats.AboveAbsMs += abs
+
+				if abs > math.Abs(stats.AboveMaxMs) {
+					stats.AboveMaxMs = deltaMs
+					stats.AboveMaxStream = si + 1
+				}
 			}
 		}
 	}
-	return
+
+	return stats
 }
 
 // formatDeltaMs форматирует дельту в миллисекундах в читаемую строку со знаком.
