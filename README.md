@@ -6,6 +6,7 @@
 - Печать информации о запросах и соединениях из pcap-файла
 - Воспроизведение трафика в реальном времени или с масштабированием скорости
 - Сравнение двух pcap-файлов с визуализацией таймлайнов (HTML / SVG)
+- Сбор benchmark-статистики PostgreSQL (`collect_info`)
 - Фильтрация по хосту и порту
 
 ## Установка
@@ -74,7 +75,7 @@ if __name__ == '__main__':
 
 #### Печать информации
 ```sh
-./trafrep print --pcap someName.pcap
+go run main.go print --pcap someName.pcap
 ```
 
 Доступные флаги:
@@ -89,7 +90,7 @@ if __name__ == '__main__':
 
 ### Воспроизведение трафика
 ```sh
-./trafrep replay --pcap someName.pcap --print-query
+go run main.go replay --pcap someName.pcap --print-query
 ```
 
 Доступные флаги:
@@ -111,14 +112,14 @@ if __name__ == '__main__':
 Команда `compare` читает два pcap-файла, строит таймлайны запросов по каждому стриму и генерирует визуализацию в формате HTML или SVG.
 
 ```sh
-./trafrep compare --pcap1 original.pcap --pcap2 repeat.pcap --output result.html
+go run main.go compare --pcap1 original.pcap --pcap2 repeat.pcap --output result.html
 ```
 
 Пример с дополнительными параметрами:
 ```sh
-./trafrep compare \
+go run main.go compare \
   --pcap1 original.pcap \
-  --pcap2 repeat.pcap \
+  --pcap2 replay.pcap \
   --format html \
   --output compare.html \
   --delta-show 1ms \
@@ -132,9 +133,41 @@ if __name__ == '__main__':
 |------|-------------|----------|
 | `--pcap1` | — | Путь к первому pcap файлу (**обязательный**) |
 | `--pcap2` | — | Путь ко второму pcap файлу (**обязательный**) |
-| `--format` | `html` | Формат вывода: `html` или `svg` |
+| `--format` | `html` | Формат вывода: `html` |
 | `--output` | `compare.html` | Путь к выходному файлу |
 | `--delta-show` | `1ms` | Порог отображения дельты рядом с сообщением |
 | `--delta-color` | `10ms` | Порог смены цвета сообщения при превышении дельты |
 | `--host` | — | IP-адрес PostgreSQL сервера для фильтрации |
 | `--port` | `5432` | Порт PostgreSQL для фильтрации |
+
+### Сбор benchmark-статистики PostgreSQL
+
+```sh
+go run main.go collect_info --host 127.0.0.1 --user postgres --password postgres --label original --out results
+```
+
+Доступные флаги:
+
+| Флаг | По умолчанию | Описание |
+|------|-------------|----------|
+| `--host` | `127.0.0.1` | Хост PostgreSQL |
+| `--port` | `5432` | Порт PostgreSQL |
+| `--dbname` | `postgres` | База данных |
+| `--user` | `postgres` | Пользователь |
+| `--password` | `postgres` | Пароль |
+| `--label` | `run` | Метка snapshot-файла |
+| `--out` | `.` | Каталог для JSON-результата |
+
+### Сравнение benchmark-статистики (`collect_info` snapshots)
+
+```sh
+go run main.go compare_stats results/original_*.json results/replay_*.json --out results/report.html
+```
+
+Доступные флаги:
+
+| Флаг | По умолчанию | Описание |
+|------|-------------|----------|
+| `--out` | `pg_compare.html` | Путь к HTML-отчету |
+| `--output` | `pg_compare.html` | Алиас для `--out` |
+
